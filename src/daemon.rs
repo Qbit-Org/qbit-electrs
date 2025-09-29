@@ -18,6 +18,7 @@ use bitcoin::consensus::encode::{deserialize, serialize};
 use elements::encode::{deserialize, serialize};
 
 use crate::chain::{Block, BlockHash, BlockHeader, Network, Transaction, Txid};
+use crate::config::BITCOIND_SUBVER;
 use crate::metrics::{HistogramOpts, HistogramVec, Metrics};
 use crate::signal::Waiter;
 use crate::util::HeaderList;
@@ -363,6 +364,9 @@ impl Daemon {
                 network_info.subversion,
             )
         }
+        // Insert the subversion (/Satoshi xx.xx.xx(comment)/) string from bitcoind
+        _ = BITCOIND_SUBVER.set(network_info.subversion);
+
         let blockchain_info = daemon.getblockchaininfo()?;
         info!("{:?}", blockchain_info);
         if blockchain_info.pruned {

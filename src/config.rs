@@ -4,7 +4,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use stderrlog;
 
 use crate::chain::Network;
@@ -17,6 +17,8 @@ use bitcoin::Network as BNetwork;
 pub(crate) const APP_NAME: &str = "mempool-electrs";
 pub(crate) const ELECTRS_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const GIT_HASH: Option<&str> = option_env!("GIT_HASH");
+// This will be set only once in the Daemon::new() constructor at startup
+pub(crate) static BITCOIND_SUBVER: OnceLock<String> = OnceLock::new();
 
 lazy_static! {
     pub(crate) static ref VERSION_STRING: String = {
