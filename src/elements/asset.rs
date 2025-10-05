@@ -33,6 +33,7 @@ fn parse_asset_id(sl: &[u8]) -> AssetId {
 
 #[derive(Serialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum LiquidAsset {
     Issued(IssuedAsset),
     Native(PeggedAsset),

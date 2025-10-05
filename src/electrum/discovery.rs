@@ -183,7 +183,7 @@ impl DiscoveryManager {
                     .filter(|service| {
                         existing_services
                             .get(&addr)
-                            .map_or(true, |s| !s.contains(service))
+                            .is_none_or(|s| !s.contains(service))
                     })
                     .map(|service| {
                         HealthCheck::new(addr.clone(), hostname.clone(), service, Some(added_by))
@@ -235,9 +235,9 @@ impl DiscoveryManager {
     /// Run the next health check in the queue (a single one)
     fn run_health_check(&self) -> Result<()> {
         // abort if there are no entries in the queue, or its still too early for the next one up
-        if self.queue.read().unwrap().peek().map_or(true, |next| {
+        if self.queue.read().unwrap().peek().is_none_or(|next| {
             next.last_check
-                .map_or(false, |t| t.elapsed() < HEALTH_CHECK_FREQ)
+                .is_some_and(|t| t.elapsed() < HEALTH_CHECK_FREQ)
         }) {
             return Ok(());
         }

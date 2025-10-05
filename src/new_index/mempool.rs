@@ -165,7 +165,7 @@ impl Mempool {
             // TODO seek directly to last seen tx without reading earlier rows
             .skip_while(|txid| {
                 // skip until we reach the last_seen_txid
-                last_seen_txid.map_or(false, |last_seen_txid| last_seen_txid != txid)
+                last_seen_txid.is_some_and(|last_seen_txid| last_seen_txid != txid)
             })
             .skip(match last_seen_txid {
                 Some(_) => 1, // skip the last_seen_txid itself
@@ -196,7 +196,7 @@ impl Mempool {
             // TODO seek directly to last seen tx without reading earlier rows
             .skip_while(|txid| {
                 // skip until we reach the last_seen_txid
-                last_seen_txid.map_or(false, |last_seen_txid| last_seen_txid != txid)
+                last_seen_txid.is_some_and(|last_seen_txid| last_seen_txid != txid)
             })
             .skip(match last_seen_txid {
                 Some(_) => 1, // skip the last_seen_txid itself
