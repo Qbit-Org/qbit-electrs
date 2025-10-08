@@ -1,5 +1,5 @@
 use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
-use crate::config::{Config, VERSION_STRING};
+use crate::config::{Config, BITCOIND_SUBVER, VERSION_STRING};
 use crate::errors;
 use crate::metrics::Metrics;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
@@ -16,7 +16,10 @@ use bitcoin::blockdata::opcodes;
 use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::hashes::Error as HashError;
 use hex::{self, FromHexError};
-use hyper::service::{make_service_fn, service_fn};
+use hyper::{
+    header::HeaderValue,
+    service::{make_service_fn, service_fn},
+};
 use hyper::{Body, Method, Response, Server, StatusCode};
 use prometheus::{HistogramOpts, HistogramVec};
 use rayon::iter::ParallelIterator;
@@ -625,13 +628,18 @@ async fn run_server(
                         Response::builder()
                             .status(err.0)
                             .header("Content-Type", "text/plain")
-                            .header("X-Powered-By", &**VERSION_STRING)
                             .body(Body::from(err.1))
                             .unwrap()
                     });
+                    resp.headers_mut()
+                        .insert("X-Powered-By", HeaderValue::from_static(&VERSION_STRING));
                     if let Some(ref origins) = config.cors {
                         resp.headers_mut()
                             .insert("Access-Control-Allow-Origin", origins.parse().unwrap());
+                    }
+                    if let Some(subver) = BITCOIND_SUBVER.get() {
+                        resp.headers_mut()
+                            .insert("X-Bitcoin-Version", HeaderValue::from_static(subver));
                     }
                     timer.observe_duration();
                     Ok::<_, hyper::Error>(resp)
@@ -815,7 +823,6 @@ fn handle_request(
                 .status(StatusCode::OK)
                 .header("Content-Type", "application/octet-stream")
                 .header("Cache-Control", format!("public, max-age={:}", TTL_LONG))
-                .header("X-Powered-By", &**VERSION_STRING)
                 .body(Body::from(raw))
                 .unwrap())
         }
@@ -1385,7 +1392,6 @@ fn handle_request(
                 .status(StatusCode::OK)
                 .header("Content-Type", content_type)
                 .header("Cache-Control", format!("public, max-age={:}", ttl))
-                .header("X-Powered-By", &**VERSION_STRING)
                 .body(body)
                 .unwrap())
         }
@@ -1771,7 +1777,6 @@ fn handle_request(
                 // Disable caching because we don't currently support caching with query string params
                 .header("Cache-Control", "no-store")
                 .header("Content-Type", "application/json")
-                .header("X-Powered-By", &**VERSION_STRING)
                 .header("X-Total-Results", total_num.to_string())
                 .body(Body::from(serde_json::to_string(&assets)?))
                 .unwrap())
@@ -1915,7 +1920,6 @@ where
         .status(status)
         .header("Content-Type", "text/plain")
         .header("Cache-Control", format!("public, max-age={:}", ttl))
-        .header("X-Powered-By", &**VERSION_STRING)
         .body(message.into())
         .unwrap())
 }
@@ -1925,7 +1929,6 @@ fn json_response<T: Serialize>(value: T, ttl: u32) -> Result<Response<Body>, Htt
     Ok(Response::builder()
         .header("Content-Type", "application/json")
         .header("Cache-Control", format!("public, max-age={:}", ttl))
-        .header("X-Powered-By", &**VERSION_STRING)
         .body(Body::from(value))
         .unwrap())
 }
@@ -1936,8 +1939,7 @@ fn json_response<T: Serialize>(value: T, ttl: u32) -> Result<Response<Body>, Htt
 // ) -> Result<Response<Body>, HttpError> {
 //     let response = Response::builder()
 //         .header("Content-Type", "application/json")
-//         .header("Cache-Control", format!("public, max-age={:}", ttl))
-//         .header("X-Powered-By", &**VERSION_STRING);
+//         .header("Cache-Control", format!("public, max-age={:}", ttl));
 //     Ok(match value {
 //         Ok(v) => response
 //             .body(Body::from(serde_json::to_string(&v)?))
