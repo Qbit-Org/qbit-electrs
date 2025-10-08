@@ -663,11 +663,11 @@ impl ChainQuery {
             .unique_by(|(txid, info, _)| (*txid, info.get_vin_or_vout(), info.has_vin()))
             .skip_while(|(txid, _, _)| {
                 // skip until we reach the last_seen_txid
-                last_seen_txid.map_or(false, |last_seen_txid| last_seen_txid != txid)
+                last_seen_txid.is_some_and(|last_seen_txid| last_seen_txid != txid)
             })
             .skip_while(|(txid, _, _)| {
                 // skip the last_seen_txid itself
-                last_seen_txid.map_or(false, |last_seen_txid| last_seen_txid == txid)
+                last_seen_txid == Some(txid)
             })
             .filter_map(|(txid, info, tx_position)| {
                 self.tx_confirming_block(&txid)
@@ -824,7 +824,7 @@ impl ChainQuery {
                 // TODO seek directly to last seen tx without reading earlier rows
                 .skip_while(move |row| {
                     // skip until we reach the last_seen_txid
-                    last_seen_txid.map_or(false, |last_seen_txid| last_seen_txid != &row.get_txid())
+                    last_seen_txid.is_some_and(|last_seen_txid| last_seen_txid != &row.get_txid())
                 })
                 .skip(match last_seen_txid {
                     Some(_) => 1, // skip the last_seen_txid itself
@@ -893,7 +893,7 @@ impl ChainQuery {
                 .skip_while(move |row| {
                     // we already seeked to the last txid at this height
                     // now skip just past the last_seen_txid itself
-                    last_seen_txid.map_or(false, |last_seen_txid| last_seen_txid != &row.get_txid())
+                    last_seen_txid.is_some_and(|last_seen_txid| last_seen_txid != &row.get_txid())
                 })
                 .skip(match last_seen_txid {
                     Some(_) => 1, // skip the last_seen_txid itself

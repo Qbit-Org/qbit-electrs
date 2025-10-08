@@ -131,7 +131,7 @@ impl BlockValue {
 /// https://github.com/bitcoin/bitcoin/blob/v25.0/src/rpc/blockchain.cpp#L75-L97
 #[cfg_attr(feature = "liquid", allow(dead_code))]
 fn difficulty_new(bh: &bitcoin::BlockHeader) -> f64 {
-    let mut n_shift = bh.bits >> 24 & 0xff;
+    let mut n_shift = (bh.bits >> 24) & 0xff;
     let mut d_diff = (0x0000ffff as f64) / ((bh.bits & 0x00ffffff) as f64);
 
     while n_shift < 29 {
