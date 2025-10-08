@@ -5,7 +5,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::thread;
 use std::time::Duration;
-use sysconf;
 use tiny_http;
 
 pub use prometheus::{
@@ -98,6 +97,14 @@ struct Stats {
     fds: usize,
 }
 
+fn get_ticks_per_second() -> Result<f64> {
+    // Safety: This code is taken directly from sysconf
+    match unsafe { libc::sysconf(libc::_SC_CLK_TCK) } {
+        -1 => Err("Clock Tick unsupported".into()),
+        ret => Ok(ret as f64),
+    }
+}
+
 fn parse_stats() -> Result<Stats> {
     if cfg!(target_os = "macos") {
         return Ok(Stats {
@@ -109,8 +116,7 @@ fn parse_stats() -> Result<Stats> {
     let value = fs::read_to_string("/proc/self/stat").chain_err(|| "failed to read stats")?;
     let parts: Vec<&str> = value.split_whitespace().collect();
     let page_size = page_size::get() as u64;
-    let ticks_per_second = sysconf::raw::sysconf(sysconf::raw::SysconfVariable::ScClkTck)
-        .expect("failed to get _SC_CLK_TCK") as f64;
+    let ticks_per_second = get_ticks_per_second().expect("failed to get _SC_CLK_TCK");
 
     let parse_part = |index: usize, name: &str| -> Result<u64> {
         parts
