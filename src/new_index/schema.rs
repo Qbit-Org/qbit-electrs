@@ -609,7 +609,12 @@ impl ChainQuery {
         })
     }
 
-    pub fn history_iter_scan(&self, code: u8, hash: &[u8], start_height: usize) -> ScanIterator {
+    pub fn history_iter_scan(
+        &self,
+        code: u8,
+        hash: &[u8],
+        start_height: usize,
+    ) -> ScanIterator<'_> {
         self.store.history_db.iter_scan_from(
             &TxHistoryRow::filter(code, hash),
             &TxHistoryRow::prefix_height(code, hash, start_height as u32),
@@ -620,7 +625,7 @@ impl ChainQuery {
         code: u8,
         hash: &[u8],
         start_height: Option<u32>,
-    ) -> ReverseScanIterator {
+    ) -> ReverseScanIterator<'_> {
         self.store.history_db.iter_scan_reverse(
             &TxHistoryRow::filter(code, hash),
             &start_height.map_or(TxHistoryRow::prefix_end(code, hash), |start_height| {
@@ -633,7 +638,7 @@ impl ChainQuery {
         code: u8,
         hashes: &[[u8; 32]],
         start_height: Option<u32>,
-    ) -> ReverseScanGroupIterator {
+    ) -> ReverseScanGroupIterator<'_> {
         self.store.history_db.iter_scan_group_reverse(
             hashes.iter().map(|hash| {
                 let prefix = TxHistoryRow::filter(code, &hash[..]);

@@ -69,13 +69,14 @@ jobs:
           mv ./.cargohome/registry ~/.cargo/
           mv ./.cargohome/git ~/.cargo/
           rm -rf ./.cargohome
-          pkg install -y git rsync gmake llvm rust
+          pkg install -y git rsync gmake llvm rust rocksdb
 
         run: |
           cargo check --no-default-features
           cargo check -F liquid
           cargo check -F electrum-discovery
           cargo check -F electrum-discovery,liquid
+          cargo build --release --bin electrs
           rm -rf ./.cargohome
           mkdir -p ~/.cargo/registry/
           mkdir -p ~/.cargo/git/
