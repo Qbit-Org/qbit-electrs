@@ -10,7 +10,7 @@ name: Compile Check and Lint
 jobs:
   check:
     name: Compile Check
-    runs-on: ubuntu-latest
+    runs-on: mempool-ci
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -21,7 +21,7 @@ jobs:
 
   fmt:
     name: Formatter
-    runs-on: ubuntu-latest
+    runs-on: mempool-ci
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -32,7 +32,7 @@ jobs:
 
   test:
     name: Run Tests
-    runs-on: ubuntu-latest
+    runs-on: mempool-ci
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -42,7 +42,7 @@ jobs:
       - run: cargo test --lib --all-features
 
   compile-freebsd:
-    runs-on: ubuntu-latest
+    runs-on: mempool-ci
     name: Run Compile Checks in FreeBSD
     env:
       FREEBSD_VER: "14.3"
@@ -86,7 +86,7 @@ jobs:
 
   clippy:
     name: Linter
-    runs-on: ubuntu-latest
+    runs-on: mempool-ci
     needs: [check]
     strategy:
       matrix: # Try all combinations of features. Some times weird things appear.
