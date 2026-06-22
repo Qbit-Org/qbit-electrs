@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "contract": {
+    "document": "doc/qbit-contract.md",
+    "qbit_repository": "qbit-reference",
+    "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+    "issues": [
+      12,
+      14,
+      22
+    ]
+  },
+  "fixtures": [
+    {
+      "id": "testnet4-p2mr-zero-program-script",
+      "network": "testnet4",
+      "fixture_type": "script",
+      "path": "tests/fixtures/qbit/scripts/testnet4-p2mr-zero-program.json",
+      "source": {
+        "kind": "derived",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit src/key_io.cpp WitnessV2P2MR and test_framework/segwit_addr.py"
+      },
+      "generation_command": "python3 tests/fixtures/qbit/scripts/generate_qbit_fixtures.py --write --check",
+      "script": "52200000000000000000000000000000000000000000000000000000000000000000",
+      "expected_parser_facts": {
+        "script_pubkey_shape": "OP_2 <32-byte merkle-root program>",
+        "witness_version": 2,
+        "witness_program_bytes": 32,
+        "network_hrp": "tq",
+        "address": "tq1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdagu6k"
+      },
+      "refresh_policy": {
+        "reproduce": "The same command must produce byte-for-byte identical output.",
+        "diff_policy": "Any diff must either update this example intentionally or update doc/qbit-contract.md to a new qbit source ref."
+      },
+      "notes": "Example shape for manifest consumers."
+    }
+  ]
+}

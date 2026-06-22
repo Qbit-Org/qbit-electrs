@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "fixture_type": "address",
+  "network": "testnet4",
+  "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+  "source": {
+    "kind": "derived",
+    "source_ref": "qbit src/key_io.cpp WitnessV2P2MR and test_framework/segwit_addr.py"
+  },
+  "p2mr": {
+    "witness_version": 2,
+    "witness_program_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+    "script_pubkey_hex": "52200000000000000000000000000000000000000000000000000000000000000000",
+    "bech32_encoding": "bech32m",
+    "hrp": "tq",
+    "address": "tq1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdagu6k"
+  },
+  "wrong_network_rejection_vectors": [
+    {
+      "network": "mainnet",
+      "address": "qb1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqm5lumh"
+    },
+    {
+      "network": "regtest",
+      "address": "qbrt1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwztzna"
+    }
+  ]
+}

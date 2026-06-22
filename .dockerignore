@@ -1,1 +1,9 @@
-Dockerfile
+.context
+.git
+.github
+target
+electrs_data
+db
+*.log
+*.core
+.DS_Store

@@ -1,0 +1,241 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:qbit-electrs:fixtures:qbit:manifest.schema.json",
+  "title": "qbit Fixture Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract",
+    "fixtures"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document",
+        "qbit_repository",
+        "qbit_commit",
+        "issues"
+      ],
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "qbit_repository": {
+          "const": "qbit-reference"
+        },
+        "qbit_commit": {
+          "$ref": "#/definitions/commit"
+        },
+        "compatible_fixture_commits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "qbit_commit",
+              "scope",
+              "reason",
+              "fixture_ids"
+            ],
+            "properties": {
+              "qbit_commit": {
+                "$ref": "#/definitions/commit"
+              },
+              "scope": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "fixture_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]*$"
+                },
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            }
+          },
+          "uniqueItems": true
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "allOf": [
+            {
+              "contains": {
+                "const": 12
+              }
+            },
+            {
+              "contains": {
+                "const": 14
+              }
+            },
+            {
+              "contains": {
+                "const": 22
+              }
+            }
+          ],
+          "minItems": 3,
+          "uniqueItems": true
+        }
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/fixture"
+      }
+    }
+  },
+  "definitions": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "network": {
+      "type": "string",
+      "enum": [
+        "mainnet",
+        "testnet4",
+        "regtest"
+      ]
+    },
+    "fixture_type": {
+      "type": "string",
+      "enum": [
+        "address",
+        "block",
+        "transaction",
+        "rpc",
+        "script",
+        "db-row",
+        "metadata"
+      ]
+    },
+    "source_kind": {
+      "type": "string",
+      "enum": [
+        "qbitd-generated",
+        "synthetic",
+        "derived"
+      ]
+    },
+    "hex32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "network",
+        "fixture_type",
+        "path",
+        "source",
+        "generation_command",
+        "expected_parser_facts",
+        "refresh_policy"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "network": {
+          "$ref": "#/definitions/network"
+        },
+        "fixture_type": {
+          "$ref": "#/definitions/fixture_type"
+        },
+        "path": {
+          "type": "string"
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "qbit_commit"
+          ],
+          "properties": {
+            "kind": {
+              "$ref": "#/definitions/source_kind"
+            },
+            "qbit_commit": {
+              "$ref": "#/definitions/commit"
+            },
+            "source_ref": {
+              "type": "string"
+            },
+            "wallet_seed": {
+              "type": "string"
+            },
+            "deterministic_key_material": {
+              "type": "string"
+            }
+          }
+        },
+        "generation_command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "txid": {
+          "$ref": "#/definitions/hex32"
+        },
+        "blockhash": {
+          "$ref": "#/definitions/hex32"
+        },
+        "address": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string"
+        },
+        "expected_parser_facts": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": true
+        },
+        "refresh_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reproduce",
+            "diff_policy"
+          ],
+          "properties": {
+            "reproduce": {
+              "type": "string"
+            },
+            "diff_policy": {
+              "type": "string"
+            }
+          }
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

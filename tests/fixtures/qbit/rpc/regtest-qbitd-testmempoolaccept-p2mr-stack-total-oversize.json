@@ -1,0 +1,7 @@
+{
+  "allowed": false,
+  "reject-details": "bad-witness-nonstandard",
+  "reject-reason": "bad-witness-nonstandard",
+  "txid": "a6d77d4a4562ab6f787d8939e6023e0066fab95b7b4d84db8e9fa755f73cdee9",
+  "wtxid": "8f57493e1b5059e209ef0139857c328dd3c81309ddec98670efcbe08843dfd07"
+}

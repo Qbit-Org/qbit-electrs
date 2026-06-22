@@ -7,8 +7,8 @@ pub mod electrum_merkle;
 pub mod fees;
 
 pub use self::block::{BlockHeaderMeta, BlockId, BlockMeta, BlockStatus, HeaderEntry, HeaderList};
-pub use self::fees::get_tx_fee;
-pub use self::script::{get_innerscripts, ScriptToAddr, ScriptToAsm};
+pub use self::fees::{get_tx_fee, tx_size, tx_vsize, tx_weight};
+pub use self::script::{get_innerscripts, to_asm_for_network, ScriptToAddr, ScriptToAsm};
 pub use self::transaction::{
     extract_tx_prevouts, has_prevout, is_coinbase, is_spendable, serialize_outpoint,
     sigops::transaction_sigop_count, TransactionStatus, TxInput,

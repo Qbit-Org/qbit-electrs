@@ -346,7 +346,58 @@ pub(super) mod sigops {
                 // I only return Ok 2 lines up, so there is no way to error
                 .map(|s| count_sigops(&s.unwrap(), true))
                 .unwrap_or_default(),
+            // qbit P2MR is witness v2 with a 32-byte program. It is bounded by
+            // per-input validation weight in qbit consensus and contributes
+            // zero to the legacy block-level witness sigop counter surfaced by
+            // electrs' REST `sigops` field.
+            (2, 32) => 0,
             _ => 0,
+        }
+    }
+
+    #[cfg(all(test, not(feature = "liquid")))]
+    mod qbit_tests {
+        use super::*;
+        use crate::chain::{OutPoint, Script, TxIn, Txid};
+
+        fn txid() -> Txid {
+            Txid::from_hex("0101010101010101010101010101010101010101010101010101010101010101")
+                .unwrap()
+        }
+
+        #[test]
+        fn p2mr_witness_contributes_zero_legacy_sigops() {
+            let prevout = TxOut {
+                value: 7,
+                script_pubkey: Script::from(
+                    hex::decode(
+                        "52200000000000000000000000000000000000000000000000000000000000000000",
+                    )
+                    .unwrap(),
+                ),
+            };
+            let outpoint = OutPoint {
+                txid: txid(),
+                vout: 0,
+            };
+            let mut leaf_script = vec![0x20];
+            leaf_script.extend_from_slice(&[0x11; 32]);
+            leaf_script.extend_from_slice(&[0xb3, 0xac]);
+            let tx = Transaction {
+                version: 2,
+                lock_time: 0,
+                input: vec![TxIn {
+                    previous_output: outpoint,
+                    script_sig: Script::new(),
+                    sequence: 0xffff_ffff,
+                    witness: Witness::from_vec(vec![vec![0x01], leaf_script, vec![0xc1]]),
+                }],
+                output: vec![],
+            };
+            let mut prevouts = HashMap::new();
+            prevouts.insert(0, &prevout);
+
+            assert_eq!(transaction_sigop_count(&tx, &prevouts).unwrap(), 0);
         }
     }
 }

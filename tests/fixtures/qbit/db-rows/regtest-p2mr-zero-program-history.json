@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "fixture_type": "db-row",
+  "network": "regtest",
+  "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+  "source": {
+    "kind": "derived",
+    "source_ref": "electrs non-liquid TxHistoryRow schema with qbit P2MR script"
+  },
+  "script_pubkey_hex": "52200000000000000000000000000000000000000000000000000000000000000000",
+  "script_hash_hex": "379bfa9706fc3e3b0dbe80ff6615a46c781ca7124daf93e513c0f77f5bb12257",
+  "history_row": {
+    "kind": "funding",
+    "confirmed_height": 2,
+    "tx_position": 3,
+    "txid": "0202020202020202020202020202020202020202020202020202020202020202",
+    "vout": 3,
+    "value_sat": 7
+  }
+}

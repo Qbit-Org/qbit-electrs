@@ -1,24 +1,40 @@
-version: '3.9'
-services:
+name: qbit-electrs
 
-  mempool-electrs:
+services:
+  qbit-electrs:
     build:
       context: .
       dockerfile: Dockerfile
     restart: on-failure
-
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - 50001:50001
-
-    entrypoint:
-      /bin/electrs
-    command: |
-      --address-search
-      --cookie mempool:mempool
-      --db-dir /electrs
-      --cors '*'
+      - "${ELECTRS_HTTP_PORT:-3004}:${ELECTRS_HTTP_PORT:-3004}"
+      - "${ELECTRS_ELECTRUM_PORT:-40001}:${ELECTRS_ELECTRUM_PORT:-40001}"
+      - "${ELECTRS_MONITORING_PORT:-44224}:${ELECTRS_MONITORING_PORT:-44224}"
+    command:
+      - --network
+      - ${ELECTRS_NETWORK:-qbittestnet4}
+      - --daemon-rpc-addr
+      - ${QBIT_DAEMON_RPC_ADDR:-host.docker.internal:48352}
+      - --daemon-dir
+      - ${QBIT_DAEMON_DIR:-/qbit/testnet4}
+      - --db-dir
+      - /electrs
+      - --http-addr
+      - 0.0.0.0:${ELECTRS_HTTP_PORT:-3004}
+      - --electrum-rpc-addr
+      - 0.0.0.0:${ELECTRS_ELECTRUM_PORT:-40001}
+      - --monitoring-addr
+      - 0.0.0.0:${ELECTRS_MONITORING_PORT:-44224}
+      - --cookie
+      - ${QBIT_RPC_COOKIE:?set QBIT_RPC_COOKIE=USER:PASSWORD for the external qbitd RPC user}
+      - --jsonrpc-import
+      - --address-search
+      - --cors
+      - "*"
     volumes:
-    - 'electrs_data:/electrs'
+      - electrs_data:/electrs
 
 volumes:
   electrs_data:

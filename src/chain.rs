@@ -39,6 +39,12 @@ pub enum Network {
     Regtest,
     #[cfg(not(feature = "liquid"))]
     Signet,
+    #[cfg(not(feature = "liquid"))]
+    Qbit,
+    #[cfg(not(feature = "liquid"))]
+    QbitTestnet4,
+    #[cfg(not(feature = "liquid"))]
+    QbitRegtest,
 
     #[cfg(feature = "liquid")]
     Liquid,
@@ -61,12 +67,32 @@ pub const LIQUID_TESTNET_PARAMS: address::AddressParams = address::AddressParams
 #[cfg(not(feature = "liquid"))]
 const TESTNET4_MAGIC: u32 = 0x283f161c;
 
+#[cfg(not(feature = "liquid"))]
+pub const QBIT_MAINNET_MAGIC: u32 = 0xA824_4F44;
+#[cfg(not(feature = "liquid"))]
+pub const QBIT_TESTNET4_MAGIC: u32 = 0x4016_C4C7;
+#[cfg(not(feature = "liquid"))]
+pub const QBIT_REGTEST_MAGIC: u32 = 0xDA1F_6BA6;
+
+#[cfg(not(feature = "liquid"))]
+pub const QBIT_MAINNET_HRP: &str = "qb";
+#[cfg(not(feature = "liquid"))]
+pub const QBIT_TESTNET4_HRP: &str = "tq";
+#[cfg(not(feature = "liquid"))]
+pub const QBIT_REGTEST_HRP: &str = "qbrt";
+
 impl Network {
     #[cfg(not(feature = "liquid"))]
     pub fn magic(self) -> u32 {
         match self {
             Self::Testnet4 => TESTNET4_MAGIC,
-            _ => BNetwork::from(self).magic(),
+            Self::Qbit => QBIT_MAINNET_MAGIC,
+            Self::QbitTestnet4 => QBIT_TESTNET4_MAGIC,
+            Self::QbitRegtest => QBIT_REGTEST_MAGIC,
+            _ => self
+                .bitcoin_network()
+                .expect("qbit network has no rust-bitcoin network magic")
+                .magic(),
         }
     }
 
@@ -82,10 +108,112 @@ impl Network {
         match self {
             #[cfg(not(feature = "liquid"))]
             Network::Regtest => true,
+            #[cfg(not(feature = "liquid"))]
+            Network::QbitRegtest => true,
             #[cfg(feature = "liquid")]
             Network::LiquidRegtest => true,
             _ => false,
         }
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    pub fn is_qbit(self) -> bool {
+        matches!(
+            self,
+            Network::Qbit | Network::QbitTestnet4 | Network::QbitRegtest
+        )
+    }
+
+    #[cfg(feature = "liquid")]
+    pub fn is_qbit(self) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    pub fn qbit_bech32_hrp(self) -> Option<&'static str> {
+        match self {
+            Network::Qbit => Some(QBIT_MAINNET_HRP),
+            Network::QbitTestnet4 => Some(QBIT_TESTNET4_HRP),
+            Network::QbitRegtest => Some(QBIT_REGTEST_HRP),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "liquid")]
+    pub fn qbit_bech32_hrp(self) -> Option<&'static str> {
+        None
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    pub fn bitcoin_network(self) -> Option<BNetwork> {
+        match self {
+            Network::Bitcoin => Some(BNetwork::Bitcoin),
+            Network::Testnet => Some(BNetwork::Testnet),
+            Network::Testnet4 => Some(BNetwork::Testnet),
+            Network::Regtest => Some(BNetwork::Regtest),
+            Network::Signet => Some(BNetwork::Signet),
+            Network::Qbit | Network::QbitTestnet4 | Network::QbitRegtest => None,
+        }
+    }
+
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            #[cfg(not(feature = "liquid"))]
+            Network::Bitcoin => "mainnet",
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet => "testnet",
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet4 => "testnet4",
+            #[cfg(not(feature = "liquid"))]
+            Network::Regtest => "regtest",
+            #[cfg(not(feature = "liquid"))]
+            Network::Signet => "signet",
+            #[cfg(not(feature = "liquid"))]
+            Network::Qbit => "qbit",
+            #[cfg(not(feature = "liquid"))]
+            Network::QbitTestnet4 => "qbittestnet4",
+            #[cfg(not(feature = "liquid"))]
+            Network::QbitRegtest => "qbitregtest",
+
+            #[cfg(feature = "liquid")]
+            Network::Liquid => "liquid",
+            #[cfg(feature = "liquid")]
+            Network::LiquidTestnet => "liquidtestnet",
+            #[cfg(feature = "liquid")]
+            Network::LiquidRegtest => "liquidregtest",
+        }
+    }
+
+    pub fn daemon_chain_name(self) -> &'static str {
+        match self {
+            #[cfg(not(feature = "liquid"))]
+            Network::Bitcoin | Network::Qbit => "main",
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet => "test",
+            #[cfg(not(feature = "liquid"))]
+            Network::Testnet4 | Network::QbitTestnet4 => "testnet4",
+            #[cfg(not(feature = "liquid"))]
+            Network::Regtest | Network::QbitRegtest => "regtest",
+            #[cfg(not(feature = "liquid"))]
+            Network::Signet => "signet",
+
+            #[cfg(feature = "liquid")]
+            Network::Liquid => "liquidv1",
+            #[cfg(feature = "liquid")]
+            Network::LiquidTestnet => "liquidtestnet",
+            #[cfg(feature = "liquid")]
+            Network::LiquidRegtest => "liquidregtest",
+        }
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    pub fn has_static_genesis_hash(self) -> bool {
+        true
+    }
+
+    #[cfg(feature = "liquid")]
+    pub fn has_static_genesis_hash(self) -> bool {
+        matches!(self, Network::Liquid)
     }
 
     #[cfg(feature = "liquid")]
@@ -120,8 +248,12 @@ impl Network {
         return vec![
             "mainnet".to_string(),
             "testnet".to_string(),
+            "testnet4".to_string(),
             "regtest".to_string(),
             "signet".to_string(),
+            "qbit".to_string(),
+            "qbittestnet4".to_string(),
+            "qbitregtest".to_string(),
         ];
 
         #[cfg(feature = "liquid")]
@@ -154,6 +286,18 @@ pub fn bitcoin_genesis_hash(network: Network) -> bitcoin::BlockHash {
             genesis_block(BNetwork::Regtest).block_hash();
         static ref SIGNET_GENESIS: bitcoin::BlockHash =
             genesis_block(BNetwork::Signet).block_hash();
+        static ref QBIT_MAINNET_GENESIS: bitcoin::BlockHash = bitcoin::BlockHash::from_str(
+            "0000324188278d089b5eabd9b62bf874c7512677cea90720af51ea5a61a2f997"
+        )
+        .unwrap();
+        static ref QBIT_TESTNET4_GENESIS: bitcoin::BlockHash = bitcoin::BlockHash::from_str(
+            "000000000000796fe86bbc0bf1b66a07e4b4c0676f74b54cf7e5ce8b3f1a0090"
+        )
+        .unwrap();
+        static ref QBIT_REGTEST_GENESIS: bitcoin::BlockHash = bitcoin::BlockHash::from_str(
+            "0ee96aa77c4b600850e349344fa21b107e805f5370ddc7a6189db12cf69acce6"
+        )
+        .unwrap();
     }
     #[cfg(not(feature = "liquid"))]
     match network {
@@ -162,6 +306,9 @@ pub fn bitcoin_genesis_hash(network: Network) -> bitcoin::BlockHash {
         Network::Testnet4 => *TESTNET4_GENESIS,
         Network::Regtest => *REGTEST_GENESIS,
         Network::Signet => *SIGNET_GENESIS,
+        Network::Qbit => *QBIT_MAINNET_GENESIS,
+        Network::QbitTestnet4 => *QBIT_TESTNET4_GENESIS,
+        Network::QbitRegtest => *QBIT_REGTEST_GENESIS,
     }
     #[cfg(feature = "liquid")]
     match network {
@@ -202,6 +349,12 @@ impl From<&str> for Network {
             "regtest" => Network::Regtest,
             #[cfg(not(feature = "liquid"))]
             "signet" => Network::Signet,
+            #[cfg(not(feature = "liquid"))]
+            "qbit" | "qbitmainnet" | "qbit-mainnet" => Network::Qbit,
+            #[cfg(not(feature = "liquid"))]
+            "qbittestnet4" | "qbit-testnet4" => Network::QbitTestnet4,
+            #[cfg(not(feature = "liquid"))]
+            "qbitregtest" | "qbit-regtest" => Network::QbitRegtest,
 
             #[cfg(feature = "liquid")]
             "liquid" => Network::Liquid,
@@ -210,7 +363,7 @@ impl From<&str> for Network {
             #[cfg(feature = "liquid")]
             "liquidregtest" => Network::LiquidRegtest,
 
-            _ => panic!("unsupported Bitcoin network: {:?}", network_name),
+            _ => panic!("unsupported network: {:?}", network_name),
         }
     }
 }
@@ -218,13 +371,9 @@ impl From<&str> for Network {
 #[cfg(not(feature = "liquid"))]
 impl From<Network> for BNetwork {
     fn from(network: Network) -> Self {
-        match network {
-            Network::Bitcoin => BNetwork::Bitcoin,
-            Network::Testnet => BNetwork::Testnet,
-            Network::Testnet4 => BNetwork::Testnet,
-            Network::Regtest => BNetwork::Regtest,
-            Network::Signet => BNetwork::Signet,
-        }
+        network
+            .bitcoin_network()
+            .expect("qbit network cannot be represented as rust-bitcoin Network")
     }
 }
 
@@ -237,5 +386,50 @@ impl From<BNetwork> for Network {
             BNetwork::Regtest => Network::Regtest,
             BNetwork::Signet => Network::Signet,
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "liquid")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qbit_network_contract_constants_match_doc() {
+        assert_eq!(Network::Qbit.magic(), QBIT_MAINNET_MAGIC);
+        assert_eq!(Network::QbitTestnet4.magic(), QBIT_TESTNET4_MAGIC);
+        assert_eq!(Network::QbitRegtest.magic(), QBIT_REGTEST_MAGIC);
+
+        assert_eq!(Network::Qbit.qbit_bech32_hrp(), Some("qb"));
+        assert_eq!(Network::QbitTestnet4.qbit_bech32_hrp(), Some("tq"));
+        assert_eq!(Network::QbitRegtest.qbit_bech32_hrp(), Some("qbrt"));
+
+        assert_eq!(
+            genesis_hash(Network::Qbit).to_string(),
+            "0000324188278d089b5eabd9b62bf874c7512677cea90720af51ea5a61a2f997"
+        );
+        assert_eq!(
+            genesis_hash(Network::QbitTestnet4).to_string(),
+            "000000000000796fe86bbc0bf1b66a07e4b4c0676f74b54cf7e5ce8b3f1a0090"
+        );
+        assert_eq!(
+            genesis_hash(Network::QbitRegtest).to_string(),
+            "0ee96aa77c4b600850e349344fa21b107e805f5370ddc7a6189db12cf69acce6"
+        );
+    }
+
+    #[test]
+    fn qbit_network_names_parse_as_distinct_variants() {
+        assert_eq!(Network::from("qbit"), Network::Qbit);
+        assert_eq!(Network::from("qbit-mainnet"), Network::Qbit);
+        assert_eq!(Network::from("qbittestnet4"), Network::QbitTestnet4);
+        assert_eq!(Network::from("qbit-testnet4"), Network::QbitTestnet4);
+        assert_eq!(Network::from("qbitregtest"), Network::QbitRegtest);
+        assert_eq!(Network::from("qbit-regtest"), Network::QbitRegtest);
+
+        assert!(Network::Qbit.is_qbit());
+        assert!(Network::QbitTestnet4.is_qbit());
+        assert!(Network::QbitRegtest.is_qbit());
+        assert!(!Network::Testnet4.is_qbit());
+        assert!(Network::QbitRegtest.is_regtest());
     }
 }

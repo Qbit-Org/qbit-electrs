@@ -17,13 +17,30 @@ use bitcoin::consensus::encode::{deserialize, serialize};
 #[cfg(feature = "liquid")]
 use elements::encode::{deserialize, serialize};
 
-use crate::chain::{Block, BlockHash, BlockHeader, Network, Transaction, Txid};
+use crate::chain::{genesis_hash, Block, BlockHash, BlockHeader, Network, Transaction, Txid};
 use crate::config::BITCOIND_SUBVER;
 use crate::metrics::{HistogramOpts, HistogramVec, Metrics};
+#[cfg(not(feature = "liquid"))]
+use crate::qbit_codec;
 use crate::signal::Waiter;
 use crate::util::HeaderList;
 
 use crate::errors::*;
+
+const DEFAULT_TX_BATCH_SIZE: usize = 50_000;
+// P2MR/PQC witnesses can make qbit raw transaction replies much larger than
+// Bitcoin replies, so keep qbit RPC batches conservative until #20 tunes them
+// against live data.
+const QBIT_TX_BATCH_SIZE: usize = 128;
+const MIN_SUPPORTED_BITCOIND_VERSION: u64 = 16_00_00;
+
+fn tx_batch_size(network: Network) -> usize {
+    if network.is_qbit() {
+        QBIT_TX_BATCH_SIZE
+    } else {
+        DEFAULT_TX_BATCH_SIZE
+    }
+}
 
 fn parse_hash<T>(value: &Value) -> Result<T>
 where
@@ -37,23 +54,69 @@ where
     .chain_err(|| format!("non-hex value: {}", value))
 }
 
-fn header_from_value(value: Value) -> Result<BlockHeader> {
+fn header_from_value(network: Network, value: Value) -> Result<BlockHeader> {
     let header_hex = value
         .as_str()
         .chain_err(|| format!("non-string header: {}", value))?;
     let header_bytes = hex::decode(header_hex).chain_err(|| "non-hex header")?;
-    deserialize(&header_bytes).chain_err(|| format!("failed to parse header {}", header_hex))
+    qbit_or_default_header_from_bytes(network, &header_bytes, header_hex)
 }
 
-fn block_from_value(value: Value) -> Result<Block> {
+fn qbit_or_default_header_from_bytes(
+    _network: Network,
+    header_bytes: &[u8],
+    header_hex: &str,
+) -> Result<BlockHeader> {
+    #[cfg(not(feature = "liquid"))]
+    if _network.is_qbit() {
+        if header_bytes.len() < qbit_codec::PURE_BLOCK_HEADER_LEN {
+            bail!(format!(
+                "failed to parse qbit header {}: got {} bytes, expected at least {}",
+                header_hex,
+                header_bytes.len(),
+                qbit_codec::PURE_BLOCK_HEADER_LEN
+            ));
+        }
+
+        let header = qbit_codec::deserialize_header(header_bytes)
+            .chain_err(|| format!("failed to parse qbit header {}", header_hex))?;
+        return Ok(header);
+    }
+
+    deserialize(header_bytes).chain_err(|| format!("failed to parse header {}", header_hex))
+}
+
+fn block_from_value(network: Network, value: Value) -> Result<(Block, u32)> {
     let block_hex = value.as_str().chain_err(|| "non-string block")?;
     let block_bytes = hex::decode(block_hex).chain_err(|| "non-hex block")?;
-    deserialize(&block_bytes).chain_err(|| format!("failed to parse block {}", block_hex))
+    let raw_size = block_bytes.len() as u32;
+    let block = qbit_or_default_block_from_bytes(network, &block_bytes, block_hex)?;
+    Ok((block, raw_size))
 }
 
-fn tx_from_value(value: Value) -> Result<Transaction> {
+pub(crate) fn qbit_or_default_block_from_bytes(
+    _network: Network,
+    block_bytes: &[u8],
+    block_label: &str,
+) -> Result<Block> {
+    #[cfg(not(feature = "liquid"))]
+    if _network.is_qbit() {
+        return qbit_codec::deserialize_block_as_bitcoin(block_bytes)
+            .chain_err(|| format!("failed to parse qbit block {}", block_label));
+    }
+
+    deserialize(block_bytes).chain_err(|| format!("failed to parse block {}", block_label))
+}
+
+fn tx_from_value(_network: Network, value: Value) -> Result<Transaction> {
     let tx_hex = value.as_str().chain_err(|| "non-string tx")?;
     let tx_bytes = hex::decode(tx_hex).chain_err(|| "non-hex tx")?;
+    #[cfg(not(feature = "liquid"))]
+    if _network.is_qbit() {
+        return qbit_codec::deserialize_transaction(&tx_bytes)
+            .chain_err(|| format!("failed to parse qbit tx {}", tx_hex));
+    }
+
     deserialize(&tx_bytes).chain_err(|| format!("failed to parse tx {}", tx_hex))
 }
 
@@ -116,6 +179,57 @@ struct NetworkInfo {
     version: u64,
     subversion: String,
     relayfee: f64, // in BTC/kB
+}
+
+fn validate_daemon_network_info(network: Network, network_info: &NetworkInfo) -> Result<()> {
+    if network.is_qbit() {
+        return Ok(());
+    }
+
+    if network_info.version < MIN_SUPPORTED_BITCOIND_VERSION {
+        bail!(
+            "{} is not supported - please use bitcoind 0.16+",
+            network_info.subversion,
+        )
+    }
+
+    Ok(())
+}
+
+fn validate_daemon_chain(
+    network: Network,
+    blockchain_info: &BlockchainInfo,
+    daemon_genesis: Option<BlockHash>,
+) -> Result<()> {
+    let expected_chain = network.daemon_chain_name();
+    if blockchain_info.chain != expected_chain {
+        bail!(format!(
+            "daemon chain mismatch: selected network {} expects getblockchaininfo.chain={}, got {}",
+            network.canonical_name(),
+            expected_chain,
+            blockchain_info.chain
+        ));
+    }
+
+    if network.has_static_genesis_hash() {
+        let expected_genesis = genesis_hash(network);
+        let daemon_genesis = daemon_genesis.chain_err(|| {
+            format!(
+                "missing daemon genesis hash for selected network {}",
+                network.canonical_name()
+            )
+        })?;
+        if daemon_genesis != expected_genesis {
+            bail!(format!(
+                "daemon genesis mismatch: selected network {} expects {}, got {}",
+                network.canonical_name(),
+                expected_genesis,
+                daemon_genesis
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -358,17 +472,18 @@ impl Daemon {
         };
         let network_info = daemon.getnetworkinfo()?;
         info!("{:?}", network_info);
-        if network_info.version < 16_00_00 {
-            bail!(
-                "{} is not supported - please use bitcoind 0.16+",
-                network_info.subversion,
-            )
-        }
+        validate_daemon_network_info(network, &network_info)?;
         // Insert the subversion (/Satoshi xx.xx.xx(comment)/) string from bitcoind
         _ = BITCOIND_SUBVER.set(network_info.subversion);
 
         let blockchain_info = daemon.getblockchaininfo()?;
         info!("{:?}", blockchain_info);
+        let daemon_genesis = if network.has_static_genesis_hash() {
+            Some(daemon.getblockhash(0)?)
+        } else {
+            None
+        };
+        validate_daemon_chain(network, &blockchain_info, daemon_genesis)?;
         if blockchain_info.pruned {
             bail!("pruned node is not supported (use '-prune=0' bitcoind flag)".to_owned())
         }
@@ -425,6 +540,10 @@ impl Daemon {
 
     pub fn magic(&self) -> u32 {
         self.magic.unwrap_or_else(|| self.network.magic())
+    }
+
+    pub fn network(&self) -> Network {
+        self.network
     }
 
     fn call_jsonrpc(&self, method: &str, request: &Value) -> Result<Value> {
@@ -530,6 +649,10 @@ impl Daemon {
         from_value(info).chain_err(|| "invalid blockchain info")
     }
 
+    pub fn getblockhash(&self, height: u32) -> Result<BlockHash> {
+        parse_hash(&self.request("getblockhash", json!([height]))?)
+    }
+
     fn getmempoolinfo(&self) -> Result<MempoolInfo> {
         let info: Value = self.request("getmempoolinfo", json!([]))?;
         from_value(info).chain_err(|| "invalid mempool info")
@@ -545,10 +668,13 @@ impl Daemon {
     }
 
     pub fn getblockheader(&self, blockhash: &BlockHash) -> Result<BlockHeader> {
-        header_from_value(self.request(
-            "getblockheader",
-            json!([blockhash.to_hex(), /*verbose=*/ false]),
-        )?)
+        header_from_value(
+            self.network,
+            self.request(
+                "getblockheader",
+                json!([blockhash.to_hex(), /*verbose=*/ false]),
+            )?,
+        )
     }
 
     pub fn getblockheaders(&self, heights: &[usize]) -> Result<Vec<BlockHeader>> {
@@ -560,13 +686,14 @@ impl Daemon {
             .collect();
         let mut result = vec![];
         for h in self.requests("getblockheader", &params_list)? {
-            result.push(header_from_value(h)?);
+            result.push(header_from_value(self.network, h)?);
         }
         Ok(result)
     }
 
     pub fn getblock(&self, blockhash: &BlockHash) -> Result<Block> {
-        let block = block_from_value(
+        let (block, _) = block_from_value(
+            self.network,
             self.request("getblock", json!([blockhash.to_hex(), /*verbose=*/ false]))?,
         )?;
         assert_eq!(block.block_hash(), *blockhash);
@@ -578,14 +705,24 @@ impl Daemon {
     }
 
     pub fn getblocks(&self, blockhashes: &[BlockHash]) -> Result<Vec<Block>> {
+        Ok(self
+            .getblocks_with_size(blockhashes)?
+            .into_iter()
+            .map(|(block, _)| block)
+            .collect())
+    }
+
+    pub fn getblocks_with_size(&self, blockhashes: &[BlockHash]) -> Result<Vec<(Block, u32)>> {
         let params_list: Vec<Value> = blockhashes
             .iter()
             .map(|hash| json!([hash.to_hex(), /*verbose=*/ false]))
             .collect();
         let values = self.requests("getblock", &params_list)?;
         let mut blocks = vec![];
-        for value in values {
-            blocks.push(block_from_value(value)?);
+        for (value, expected_hash) in values.into_iter().zip(blockhashes) {
+            let (block, size) = block_from_value(self.network, value)?;
+            assert_eq!(block.block_hash(), *expected_hash);
+            blocks.push((block, size));
         }
         Ok(blocks)
     }
@@ -595,10 +732,12 @@ impl Daemon {
             .iter()
             .map(|txhash| json!([txhash.to_hex(), /*verbose=*/ false]))
             .collect();
-        let values = self.retry_request_batch("getrawtransaction", &params_list, 0.25)?;
         let mut txs = vec![];
-        for value in values {
-            txs.push(tx_from_value(value)?);
+        for chunk in params_list.chunks(tx_batch_size(self.network)) {
+            let values = self.retry_request_batch("getrawtransaction", chunk, 0.25)?;
+            for value in values {
+                txs.push(tx_from_value(self.network, value)?);
+            }
         }
         // missing transactions are skipped, so the number of txs returned may be less than the number of txids requested
         Ok(txs)
@@ -621,7 +760,7 @@ impl Daemon {
             "getrawtransaction",
             json!([txhash.to_hex(), /*verbose=*/ false]),
         )?;
-        tx_from_value(value)
+        tx_from_value(self.network, value)
     }
 
     pub fn getmempooltxids(&self) -> Result<HashSet<Txid>> {
@@ -771,5 +910,169 @@ impl Daemon {
 
         // from BTC/kB to sat/b
         Ok(relayfee * 100_000f64)
+    }
+}
+
+#[cfg(all(test, not(feature = "liquid")))]
+mod tests {
+    use super::*;
+    use bitcoin::consensus::encode::serialize;
+
+    fn fixture_hex(path: &str) -> Vec<u8> {
+        let hex = std::fs::read_to_string(path).expect("fixture hex should be readable");
+        hex::decode(hex.split_whitespace().collect::<String>()).expect("fixture hex should decode")
+    }
+
+    fn blockchain_info(chain: &str) -> BlockchainInfo {
+        BlockchainInfo {
+            chain: chain.to_string(),
+            blocks: 0,
+            headers: 0,
+            bestblockhash: String::new(),
+            pruned: false,
+            verificationprogress: 1.0,
+            initialblockdownload: Some(false),
+        }
+    }
+
+    fn network_info(version: u64, subversion: &str) -> NetworkInfo {
+        NetworkInfo {
+            version,
+            subversion: subversion.to_string(),
+            relayfee: 0.0,
+        }
+    }
+
+    #[test]
+    fn bitcoin_startup_validation_rejects_unsupported_daemon_version() {
+        let err = validate_daemon_network_info(
+            Network::Regtest,
+            &network_info(MIN_SUPPORTED_BITCOIND_VERSION - 1, "/Satoshi:0.15.2/"),
+        )
+        .expect_err("Bitcoin regtest must keep the inherited bitcoind 0.16+ floor");
+
+        assert!(err.to_string().contains("bitcoind 0.16+"));
+        assert!(err.to_string().contains("/Satoshi:0.15.2/"));
+    }
+
+    #[test]
+    fn qbit_startup_validation_accepts_qbitd_subversion_numbering() {
+        validate_daemon_network_info(
+            Network::QbitRegtest,
+            &network_info(100, "/qbit:0.1.0-testnet4-rc3/"),
+        )
+        .expect("qbitd uses qbit version numbering, not Bitcoin Core version numbers");
+    }
+
+    #[test]
+    fn qbit_startup_validation_rejects_bitcoin_regtest_genesis() {
+        let err = validate_daemon_chain(
+            Network::QbitRegtest,
+            &blockchain_info("regtest"),
+            Some(genesis_hash(Network::Regtest)),
+        )
+        .expect_err("Bitcoin regtest genesis must not satisfy qbit regtest");
+
+        assert!(err.to_string().contains("daemon genesis mismatch"));
+        assert!(err.to_string().contains("qbitregtest"));
+    }
+
+    #[test]
+    fn qbit_startup_validation_rejects_wrong_chain_label() {
+        let err = validate_daemon_chain(
+            Network::QbitTestnet4,
+            &blockchain_info("test"),
+            Some(genesis_hash(Network::QbitTestnet4)),
+        )
+        .expect_err("qbit testnet4 must require the daemon testnet4 chain");
+
+        assert!(err.to_string().contains("daemon chain mismatch"));
+        assert!(err.to_string().contains("testnet4"));
+    }
+
+    #[test]
+    fn qbit_startup_validation_accepts_matching_chain_and_genesis() {
+        validate_daemon_chain(
+            Network::QbitTestnet4,
+            &blockchain_info("testnet4"),
+            Some(genesis_hash(Network::QbitTestnet4)),
+        )
+        .expect("matching qbit testnet4 daemon facts should pass");
+    }
+
+    #[test]
+    fn qbit_tx_batch_size_is_conservative() {
+        assert_eq!(tx_batch_size(Network::Bitcoin), DEFAULT_TX_BATCH_SIZE);
+        assert_eq!(tx_batch_size(Network::Regtest), DEFAULT_TX_BATCH_SIZE);
+        assert_eq!(tx_batch_size(Network::Qbit), QBIT_TX_BATCH_SIZE);
+        assert_eq!(tx_batch_size(Network::QbitTestnet4), QBIT_TX_BATCH_SIZE);
+        assert_eq!(tx_batch_size(Network::QbitRegtest), QBIT_TX_BATCH_SIZE);
+        assert!(QBIT_TX_BATCH_SIZE < DEFAULT_TX_BATCH_SIZE);
+    }
+
+    #[test]
+    fn qbit_block_from_rpc_value_uses_auxpow_aware_parser_and_raw_size() {
+        let raw = fixture_hex("tests/fixtures/qbit/blocks/regtest-qbitd-auxpow-block.hex");
+        let (block, raw_size) =
+            block_from_value(Network::QbitRegtest, Value::String(hex::encode(&raw)))
+                .expect("qbit AuxPoW block should parse through daemon helper");
+
+        assert_eq!(raw_size as usize, raw.len());
+        assert_eq!(
+            block.block_hash().to_string(),
+            "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca"
+        );
+        assert_eq!(block.txdata.len(), 1);
+        assert!(
+            raw_size as usize > serialize(&block).len(),
+            "raw qbit block size must preserve AuxPoW bytes that bitcoin::Block cannot store"
+        );
+    }
+
+    #[test]
+    fn qbit_tx_from_rpc_value_preserves_witness_bytes() {
+        let raw = fixture_hex("tests/fixtures/qbit/transactions/regtest-witness-tx.hex");
+        let tx = tx_from_value(Network::QbitRegtest, Value::String(hex::encode(&raw)))
+            .expect("qbit witness transaction should parse through daemon helper");
+
+        assert_eq!(serialize(&tx), raw);
+        assert_eq!(tx.input.len(), 1);
+        assert_eq!(tx.input[0].witness.len(), 1);
+        assert_eq!(tx.input[0].witness.iter().next().unwrap(), &[0xab, 0xcd]);
+    }
+
+    #[test]
+    fn qbit_header_from_rpc_value_accepts_extended_auxpow_header_payload() {
+        let header_payload =
+            fixture_hex("tests/fixtures/qbit/headers/regtest-qbitd-auxpow-extended-header.hex");
+        let header = header_from_value(
+            Network::QbitRegtest,
+            Value::String(hex::encode(&header_payload)),
+        )
+        .expect("qbit AuxPoW header payload should normalize to pure header");
+
+        assert!(qbit_codec::has_auxpow_flag(header.version));
+        assert_eq!(
+            header.block_hash().to_string(),
+            "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca"
+        );
+    }
+
+    #[test]
+    fn qbit_header_from_rpc_value_rejects_auxpow_header_with_trailing_tx_vector() {
+        let raw = fixture_hex("tests/fixtures/qbit/blocks/regtest-qbitd-auxpow-block.hex");
+        let err = header_from_value(Network::QbitRegtest, Value::String(hex::encode(&raw)))
+            .expect_err("AuxPoW header parser must reject whole-block trailing transaction bytes");
+
+        assert!(err.to_string().contains("failed to parse qbit header"));
+    }
+
+    #[test]
+    fn qbit_header_from_rpc_value_rejects_non_auxpow_trailing_bytes() {
+        let raw = fixture_hex("tests/fixtures/qbit/blocks/regtest-synthetic-non-auxpow-block.hex");
+        let err = header_from_value(Network::QbitRegtest, Value::String(hex::encode(&raw)))
+            .expect_err("non-AuxPoW qbit header must not accept trailing block bytes");
+
+        assert!(err.to_string().contains("failed to parse qbit header"));
     }
 }

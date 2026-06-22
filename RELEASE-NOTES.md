@@ -1,3 +1,47 @@
+# qbit-electrs release notes
+
+qbit-electrs is based on mempool/electrs v3.3.0. qbit-specific release notes are
+listed first; inherited upstream electrs notes are retained below for lineage.
+
+## 3.3.0-qbit.1
+
+### Added
+
+* qbit mainnet, testnet4, and regtest network modes with qbit daemon defaults,
+  Docker Compose support for an external `qbitd`, and packaging documentation.
+* qbit wire-codec and daemon-ingestion support for P2MR addresses and scripts,
+  WSF=1 fee and size semantics, pure 80-byte block headers, and AuxPoW block
+  payload parsing.
+* REST and Electrum behavior for qbit tip, header, address, UTXO, mempool,
+  spend-confirmation, transaction-broadcast, fee-estimate, block, proof, and
+  AuxPoW header flows.
+* Local qbit regtest harness and read-only live qbit testnet4 canary flows that
+  compare qbit RPC truth with REST, Electrum, AuxPoW, fee-estimate, mempool, and
+  resource-metric outputs.
+* Deterministic qbit fixture bundles for P2MR spends, AuxPoW blocks and headers,
+  REST/Electrum snapshots, mempool vsize parity, fee estimates, mempool
+  histograms, and sigop-adjusted vsize policy.
+
+### Changed
+
+* Retained inherited Bitcoin and Liquid electrs modes while scoping qbit
+  correctness to the non-Liquid qbit networks.
+* Standardized qbit fee-estimate targets around block counts while documenting
+  qbit's shorter target block cadence.
+* Kept qbit REST transaction `size`, `weight`, and `vsize` fields on
+  witness-inclusive serialized byte length, with fixture evidence for qbitd's
+  sigop-adjusted mempool vsize behavior.
+
+### Validation
+
+* Added release CI and harness source-fetch coverage for building qbit and
+  qbit-electrs test inputs reproducibly.
+* Expanded regression coverage across qbit codec boundaries, P2MR address and
+  script behavior, REST/Electrum fixture snapshots, AuxPoW consumers, fee
+  estimates, mempool metrics, and live-canary parity checks.
+
+# Inherited electrs release notes
+
 # 0.4.1 (14 Oct 2018)
 
 * Don't run full compaction after initial import is over (when using JSONRPC)

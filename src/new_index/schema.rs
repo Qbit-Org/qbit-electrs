@@ -41,6 +41,10 @@ use super::{db::ReverseScanGroupIterator, fetch::bitcoind_sequential_fetcher};
 
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 100;
 
+fn should_fetch_raw_block_from_daemon(light_mode: bool, network: Network) -> bool {
+    light_mode || network.is_qbit()
+}
+
 pub struct Store {
     // TODO: should be column families
     txstore_db: DB,
@@ -326,7 +330,13 @@ impl Indexer {
         // Must rollback blocks before rolling forward
         let headers_len = {
             let mut headers = self.store.indexed_headers.write().unwrap();
-            let (reorged, rollback_tip) = headers.apply(new_headers.clone());
+            let (reorged, rollback_tip) = if new_headers.is_empty() && tip != *headers.tip() {
+                headers.rollback_to(&tip).chain_err(|| {
+                    format!("daemon tip {} is not connected to indexed headers", tip)
+                })?
+            } else {
+                headers.apply(new_headers.clone())
+            };
             assert_eq!(tip, *headers.tip());
             let headers_len = headers.len();
             drop(headers);
@@ -564,7 +574,10 @@ impl ChainQuery {
     pub fn get_block_raw(&self, hash: &BlockHash) -> Option<Vec<u8>> {
         let _timer = self.start_timer("get_block_raw");
 
-        if self.light_mode {
+        if should_fetch_raw_block_from_daemon(self.light_mode, self.network) {
+            // qbit AuxPoW blocks contain bytes between the pure 80-byte header
+            // and tx vector that the indexed bitcoin::Block shape cannot
+            // reconstruct. Ask the daemon for raw qbit block bytes instead.
             let blockhex = self.daemon.getblock_raw(hash, 0).ok()?;
             Some(hex::decode(blockhex.as_str().unwrap()).unwrap())
         } else {
@@ -2332,5 +2345,108 @@ mod tests {
                 0, 0, 5, 57
             ]
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "liquid")))]
+mod qbit_tests {
+    use super::*;
+
+    #[test]
+    fn qbit_raw_blocks_fetch_from_daemon_in_indexed_mode() {
+        assert!(!should_fetch_raw_block_from_daemon(false, Network::Bitcoin));
+        assert!(!should_fetch_raw_block_from_daemon(false, Network::Regtest));
+        assert!(should_fetch_raw_block_from_daemon(true, Network::Bitcoin));
+        assert!(should_fetch_raw_block_from_daemon(false, Network::Qbit));
+        assert!(should_fetch_raw_block_from_daemon(
+            false,
+            Network::QbitTestnet4
+        ));
+        assert!(should_fetch_raw_block_from_daemon(
+            false,
+            Network::QbitRegtest
+        ));
+    }
+
+    #[test]
+    fn qbit_p2mr_history_row_fixture_round_trips_non_liquid() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/qbit/db-rows/regtest-p2mr-zero-program-history.json"
+        ))
+        .expect("qbit db-row fixture should parse");
+        let script_pubkey = Script::from(
+            hex::decode(
+                fixture["script_pubkey_hex"]
+                    .as_str()
+                    .expect("script_pubkey_hex should be a string"),
+            )
+            .expect("script_pubkey_hex should decode"),
+        );
+        let script_hash = compute_script_hash(&script_pubkey);
+        assert_eq!(
+            hex::encode(script_hash),
+            fixture["script_hash_hex"]
+                .as_str()
+                .expect("script_hash_hex should be a string")
+        );
+
+        let history = &fixture["history_row"];
+        assert_eq!(history["kind"], "funding");
+        let txid_bytes = hex::decode(history["txid"].as_str().expect("txid should be a string"))
+            .expect("txid should decode");
+        let row = TxHistoryRow::new(
+            &script_pubkey,
+            history["confirmed_height"]
+                .as_u64()
+                .expect("confirmed_height should be a number") as u32,
+            history["tx_position"]
+                .as_u64()
+                .expect("tx_position should be a number") as u16,
+            TxHistoryInfo::Funding(FundingInfo {
+                txid: full_hash(&txid_bytes),
+                vout: history["vout"].as_u64().expect("vout should be a number") as u32,
+                value: history["value_sat"]
+                    .as_u64()
+                    .expect("value_sat should be a number"),
+            }),
+        );
+
+        let decoded = TxHistoryRow::from_row(row.into_row());
+        assert_eq!(decoded.key.code, b'H');
+        assert_eq!(decoded.key.hash, script_hash);
+        assert_eq!(decoded.key.confirmed_height, 2);
+        assert_eq!(decoded.key.tx_position, 3);
+        assert_eq!(
+            decoded.key.txinfo,
+            TxHistoryInfo::Funding(FundingInfo {
+                txid: full_hash(&txid_bytes),
+                vout: 3,
+                value: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn qbit_p2mr_addr_search_row_uses_fixture_address() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/qbit/addresses/testnet4-p2mr-zero-program.json"
+        ))
+        .expect("qbit address fixture should parse");
+        let script_pubkey = Script::from(
+            hex::decode(
+                fixture["p2mr"]["script_pubkey_hex"]
+                    .as_str()
+                    .expect("script_pubkey_hex should be a string"),
+            )
+            .expect("script_pubkey_hex should decode"),
+        );
+        let address = fixture["p2mr"]["address"]
+            .as_str()
+            .expect("address should be a string");
+
+        let row = addr_search_row(&script_pubkey, Network::QbitTestnet4)
+            .expect("qbit P2MR script should produce an address-search row");
+        assert_eq!(row.key, [b"a", address.as_bytes()].concat());
+        assert!(row.value.is_empty());
     }
 }

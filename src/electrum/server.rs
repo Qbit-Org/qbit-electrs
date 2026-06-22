@@ -24,8 +24,8 @@ use bitcoin::consensus::encode::serialize;
 #[cfg(feature = "liquid")]
 use elements::encode::serialize;
 
-use crate::chain::Txid;
-use crate::config::{Config, VERSION_STRING};
+use crate::chain::{BlockHeader, Network, Txid};
+use crate::config::{version_string_for_network, Config};
 use crate::electrum::{get_electrum_height, ProtocolVersion};
 use crate::errors::*;
 use crate::metrics::{Gauge, HistogramOpts, HistogramVec, MetricOpts, Metrics};
@@ -41,6 +41,23 @@ const MAX_HEADERS: usize = 2016;
 
 #[cfg(feature = "electrum-discovery")]
 use crate::electrum::{DiscoveryManager, ServerFeatures};
+
+fn pure_header_hex(header: &BlockHeader) -> String {
+    hex::encode(serialize(header))
+}
+
+fn electrum_header_hex(entry: &HeaderEntry) -> String {
+    pure_header_hex(entry.header())
+}
+
+fn electrum_server_version(network: Network) -> String {
+    version_string_for_network(network)
+}
+
+#[cfg(feature = "electrum-discovery")]
+fn should_start_discovery(network: Network, has_public_hosts: bool) -> bool {
+    has_public_hosts && !network.is_qbit()
+}
 
 // TODO: Sha256dHash should be a generic hash-container (since script hash is single SHA256)
 fn hash_from_value(val: Option<&Value>) -> Result<Sha256dHash> {
@@ -152,14 +169,17 @@ impl Connection {
 
     fn blockchain_headers_subscribe(&mut self) -> Result<Value> {
         let entry = self.query.chain().best_header();
-        let hex_header = hex::encode(serialize(entry.header()));
+        let hex_header = electrum_header_hex(&entry);
         let result = json!({"hex": hex_header, "height": entry.height()});
         self.last_header_entry = Some(entry);
         Ok(result)
     }
 
     fn server_version(&self) -> Result<Value> {
-        Ok(json!([VERSION_STRING.as_str(), PROTOCOL_VERSION]))
+        Ok(json!([
+            electrum_server_version(self.query.network()),
+            PROTOCOL_VERSION
+        ]))
     }
 
     fn server_banner(&self) -> Result<Value> {
@@ -225,7 +245,7 @@ impl Connection {
             .query
             .chain()
             .header_by_height(height)
-            .map(|entry| hex::encode(serialize(entry.header())))
+            .map(|entry| electrum_header_hex(&entry))
             .chain_err(|| "missing header")?;
 
         if cp_height == 0 {
@@ -251,7 +271,7 @@ impl Connection {
                 self.query
                     .chain()
                     .header_by_height(height)
-                    .map(|entry| hex::encode(serialize(entry.header())))
+                    .map(|entry| electrum_header_hex(&entry))
             })
             .collect();
 
@@ -510,7 +530,7 @@ impl Connection {
             let entry = self.query.chain().best_header();
             if *last_entry != entry {
                 *last_entry = entry;
-                let hex_header = hex::encode(serialize(last_entry.header()));
+                let hex_header = electrum_header_hex(last_entry);
                 let header = json!({"hex": hex_header, "height": last_entry.height()});
                 result.push(json!({
                     "jsonrpc": "2.0",
@@ -830,29 +850,40 @@ impl RPC {
 
         let notification = Channel::unbounded();
 
-        // Discovery is enabled when electrum-public-hosts is set
+        // Discovery is enabled when electrum-public-hosts is set, except on
+        // qbit v1 where no public Electrum seed network exists yet.
         #[cfg(feature = "electrum-discovery")]
-        let discovery = config.electrum_public_hosts.clone().map(|hosts| {
-            use crate::chain::genesis_hash;
-            let features = ServerFeatures {
-                hosts,
-                server_version: VERSION_STRING.clone(),
-                genesis_hash: genesis_hash(config.network_type),
-                protocol_min: PROTOCOL_VERSION,
-                protocol_max: PROTOCOL_VERSION,
-                hash_function: "sha256".into(),
-                pruning: None,
-            };
-            let discovery = Arc::new(DiscoveryManager::new(
-                config.network_type,
-                features,
-                PROTOCOL_VERSION,
-                config.electrum_announce,
-                config.tor_proxy,
-            ));
-            DiscoveryManager::spawn_jobs_thread(Arc::clone(&discovery));
-            discovery
-        });
+        let discovery = {
+            if config.network_type.is_qbit()
+                && (config.electrum_public_hosts.is_some() || config.electrum_announce)
+            {
+                warn!("Electrum discovery is disabled for qbit v1; ignoring qbit discovery config");
+            }
+
+            config.electrum_public_hosts.clone().and_then(|hosts| {
+                should_start_discovery(config.network_type, true).then(|| {
+                    use crate::chain::genesis_hash;
+                    let features = ServerFeatures {
+                        hosts,
+                        server_version: electrum_server_version(config.network_type),
+                        genesis_hash: genesis_hash(config.network_type),
+                        protocol_min: PROTOCOL_VERSION,
+                        protocol_max: PROTOCOL_VERSION,
+                        hash_function: "sha256".into(),
+                        pruning: None,
+                    };
+                    let discovery = Arc::new(DiscoveryManager::new(
+                        config.network_type,
+                        features,
+                        PROTOCOL_VERSION,
+                        config.electrum_announce,
+                        config.tor_proxy,
+                    ));
+                    DiscoveryManager::spawn_jobs_thread(Arc::clone(&discovery));
+                    discovery
+                })
+            })
+        };
 
         let txs_limit = config.electrum_txs_limit;
 
@@ -959,6 +990,69 @@ impl Drop for RPC {
         crate::util::with_spawned_threads(|threads| {
             trace!("Threads after dropping RPC: {:?}", threads);
         });
+    }
+}
+
+#[cfg(all(test, not(feature = "liquid")))]
+mod qbit_tests {
+    use super::*;
+    use crate::qbit_codec::{self, PURE_BLOCK_HEADER_LEN};
+
+    fn fixture_hex(path: &str) -> Vec<u8> {
+        let hex = std::fs::read_to_string(path).expect("fixture hex should be readable");
+        hex::decode(hex.split_whitespace().collect::<String>()).expect("fixture hex should decode")
+    }
+
+    #[test]
+    fn electrum_protocol_version_stays_1_4_for_qbit() {
+        assert_eq!(PROTOCOL_VERSION.to_string(), "1.4");
+    }
+
+    #[test]
+    fn electrum_server_version_identifies_qbit_networks() {
+        assert!(electrum_server_version(Network::QbitTestnet4).starts_with("qbit-electrs "));
+        assert!(electrum_server_version(Network::Bitcoin).starts_with("qbit-electrs "));
+    }
+
+    #[test]
+    fn qbit_electrum_headers_use_pure_80_byte_header() {
+        let raw = fixture_hex("tests/fixtures/qbit/blocks/regtest-qbitd-auxpow-block.hex");
+        let pure_header =
+            fixture_hex("tests/fixtures/qbit/headers/regtest-qbitd-auxpow-header.hex");
+        let extended_header =
+            fixture_hex("tests/fixtures/qbit/headers/regtest-qbitd-auxpow-extended-header.hex");
+        let block = qbit_codec::deserialize_block(&raw).expect("qbit AuxPoW block should parse");
+        let header_hex = pure_header_hex(&block.header);
+
+        assert!(block.has_auxpow());
+        assert_eq!(pure_header, raw[..PURE_BLOCK_HEADER_LEN]);
+        assert_eq!(extended_header, raw[..extended_header.len()]);
+        assert!(extended_header.starts_with(&pure_header));
+        assert_eq!(header_hex.len(), PURE_BLOCK_HEADER_LEN * 2);
+        assert_eq!(
+            header_hex,
+            hex::encode(&pure_header),
+            "Electrum qbit header methods expose the pure block header, not the AuxPoW payload"
+        );
+        assert_ne!(
+            header_hex,
+            hex::encode(&extended_header),
+            "Electrum qbit header methods must not expose qbitd's AuxPoW-extended serialized header"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "electrum-discovery", not(feature = "liquid")))]
+mod qbit_discovery_policy_tests {
+    use super::*;
+
+    #[test]
+    fn qbit_v1_does_not_start_electrum_discovery() {
+        assert!(!should_start_discovery(Network::Qbit, true));
+        assert!(!should_start_discovery(Network::QbitTestnet4, true));
+        assert!(!should_start_discovery(Network::QbitRegtest, true));
+        assert!(should_start_discovery(Network::Bitcoin, true));
+        assert!(!should_start_discovery(Network::Bitcoin, false));
     }
 }
 

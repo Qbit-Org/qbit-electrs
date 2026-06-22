@@ -2,7 +2,7 @@ on:
   pull_request:
   push:
     branches:
-      - mempool
+      - main
 
 
 name: Compile Check and Lint
@@ -10,7 +10,7 @@ name: Compile Check and Lint
 jobs:
   check:
     name: Compile Check
-    runs-on: mempool-ci
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -21,7 +21,7 @@ jobs:
 
   fmt:
     name: Formatter
-    runs-on: mempool-ci
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -32,7 +32,7 @@ jobs:
 
   test:
     name: Run Tests
-    runs-on: mempool-ci
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Setup Rust
@@ -41,54 +41,234 @@ jobs:
           cache-name: test
       - run: cargo test --lib --all-features
 
-  compile-freebsd:
-    runs-on: mempool-ci
-    name: Run Compile Checks in FreeBSD
+  qbit-regtest-harness:
+    name: qbit Regtest Harness
+    runs-on: ubuntu-latest
+    needs: [check, test]
+    timeout-minutes: 90
+    # Prefer verified public qbit release binaries so CI does not rebuild qbitd
+    # on every run. If the pinned public release asset is unavailable, fall back
+    # to a public source build from the checked-in qbit contract ref.
     env:
-      FREEBSD_VER: "14.3"
+      QBIT_RELEASE_REPO: Qbit-Org/qbit
+      QBIT_RELEASE_TAG: v0.1.0-testnet4
+      QBIT_RELEASE_ASSET: qbit-0.1.0-testnet4-x86_64-linux-gnu.tar.gz
+      QBIT_RELEASE_SHA256: aaa6c6a4e501809ef1b05a4e63280c24341acdc3a000cc686d928705f1455ac7
+      QBIT_RELEASE_SOURCE_COMMIT: 57bb53575f0d4931e77ac4a34b7e7f4c049f0636
+      QBIT_SOURCE_REPO: Qbit-Org/qbit
     steps:
-    - uses: actions/checkout@v4
-    - name: Cache dependencies for FreeBSD
-      uses: actions/cache@v3
-      with:
-        path: |
-          .cargohome/registry
-          .cargohome/git
-          target
-        key: freebsd-${{ env.FREEBSD_VER }}-cargo-checks-${{ hashFiles('**/Cargo.lock') }}
-    - name: Compile Checks in FreeBSD
-      uses: vmactions/freebsd-vm@v1
-      with:
-        usesh: true
-        release: "${{ env.FREEBSD_VER }}"
-        arch: amd64
-        prepare: |
-          mkdir -p ~/.cargo/
-          mkdir -p ./.cargohome/registry/
-          mkdir -p ./.cargohome/git/
-          mv ./.cargohome/registry ~/.cargo/
-          mv ./.cargohome/git ~/.cargo/
-          rm -rf ./.cargohome
-          pkg install -y git rsync gmake llvm rust rocksdb
-
+      - uses: actions/checkout@v4
+      - name: Select qbit harness source
+        id: qbit-harness-source
         run: |
-          cargo check --no-default-features
-          cargo check -F liquid
-          cargo check -F electrum-discovery
-          cargo check -F electrum-discovery,liquid
-          cargo build --release --bin electrs
-          rm -rf ./.cargohome
-          mkdir -p ~/.cargo/registry/
-          mkdir -p ~/.cargo/git/
-          mkdir -p ./.cargohome/
-          mv ~/.cargo/registry ./.cargohome/
-          mv ~/.cargo/git ./.cargohome/
+          set -euo pipefail
+          contract_commit="$(python3 - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          contract = pathlib.Path("doc/qbit-contract.md").read_text()
+          match = re.search(
+              r"qbit source ref: `(?:origin/main|pinned snapshot)` at `([0-9a-f]{40})`",
+              contract,
+          )
+          if not match:
+              sys.exit(1)
+          print(match.group(1))
+          PY
+          )"
+          if [ -z "${contract_commit}" ]; then
+            echo "failed to read qbit source ref from doc/qbit-contract.md" >&2
+            exit 1
+          fi
+          select_source_build() {
+            local message="$1"
+            if [ -z "${QBIT_SOURCE_REPO}" ]; then
+              echo "::error title=qbit source repo missing::${message} QBIT_SOURCE_REPO is not set."
+              exit 1
+            fi
+            echo "::notice title=qbit source build fallback::${message} Falling back to a public qbit source build."
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "mode=source" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ -z "${QBIT_RELEASE_REPO}" ]; then
+            select_source_build "No qbit release repository is configured."
+          fi
+          release_fingerprint="${QBIT_RELEASE_TAG}:${QBIT_RELEASE_ASSET}:${QBIT_RELEASE_SHA256}"
+          case "${release_fingerprint}" in
+            "v0.1.0-testnet4:qbit-0.1.0-testnet4-x86_64-linux-gnu.tar.gz:aaa6c6a4e501809ef1b05a4e63280c24341acdc3a000cc686d928705f1455ac7")
+              release_qbit_commit="${QBIT_RELEASE_SOURCE_COMMIT}"
+              ;;
+            *)
+              select_source_build "No qbit source commit provenance is recorded for release artifact ${release_fingerprint}."
+              ;;
+          esac
+          if [ -z "${release_qbit_commit}" ]; then
+            select_source_build "QBIT_RELEASE_SOURCE_COMMIT is not configured for release artifact ${release_fingerprint}."
+          fi
+          if [ "${release_qbit_commit}" != "${contract_commit}" ]; then
+            select_source_build "${QBIT_RELEASE_TAG} was built from ${release_qbit_commit}, but doc/qbit-contract.md requires ${contract_commit}."
+          fi
+          release_url="https://github.com/${QBIT_RELEASE_REPO}/releases/download/${QBIT_RELEASE_TAG}/${QBIT_RELEASE_ASSET}"
+          if curl --fail --location --silent --show-error --head "${release_url}" >/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "release_auth=public" >> "$GITHUB_OUTPUT"
+            echo "release_url=${release_url}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          select_source_build "No public ${QBIT_RELEASE_REPO} release asset was reachable."
+      - name: Setup Rust
+        if: steps.qbit-harness-source.outputs.enabled == 'true'
+        uses: './.github/actions/ci-rust-setup'
+        with:
+          cache-name: qbit-harness
+      - name: Cache qbit release binaries
+        id: qbit-release-cache
+        if: steps.qbit-harness-source.outputs.mode == 'release'
+        uses: actions/cache@v4
+        with:
+          path: .context/qbit-release
+          key: ${{ runner.os }}-${{ runner.arch }}-qbit-release-v1-${{ env.QBIT_RELEASE_TAG }}-${{ env.QBIT_RELEASE_SHA256 }}
+      - name: Download qbit release binaries
+        id: qbit-release
+        if: steps.qbit-harness-source.outputs.mode == 'release'
+        run: |
+          set -euo pipefail
+          mkdir -p .context/qbit-release
+          if [ ! -x .context/qbit-release/bin/qbitd ] || [ ! -x .context/qbit-release/bin/qbit-cli ]; then
+            find .context/qbit-release -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+            curl --fail --location --retry 3 --retry-delay 2 \
+              --output ".context/qbit-release/${QBIT_RELEASE_ASSET}" \
+              "${{ steps.qbit-harness-source.outputs.release_url }}"
+            curl --fail --location --retry 3 --retry-delay 2 \
+              --output .context/qbit-release/SHA256SUMS \
+              "https://github.com/${QBIT_RELEASE_REPO}/releases/download/${QBIT_RELEASE_TAG}/SHA256SUMS"
+            actual_sha256="$(sha256sum ".context/qbit-release/${QBIT_RELEASE_ASSET}" | awk '{print $1}')"
+            if [ "${actual_sha256}" != "${QBIT_RELEASE_SHA256}" ]; then
+              echo "qbit release asset SHA256 mismatch: ${actual_sha256}" >&2
+              exit 1
+            fi
+            (
+              cd .context/qbit-release
+              sha256sum -c SHA256SUMS --ignore-missing
+            )
+            mkdir -p .context/qbit-release/extract .context/qbit-release/bin
+            tar -xzf ".context/qbit-release/${QBIT_RELEASE_ASSET}" -C .context/qbit-release/extract
+            release_root="$(find .context/qbit-release/extract -mindepth 1 -maxdepth 1 -type d -print -quit)"
+            cp "${release_root}/bin/qbitd" "${release_root}/bin/qbit-cli" .context/qbit-release/bin/
+            chmod +x .context/qbit-release/bin/qbitd .context/qbit-release/bin/qbit-cli
+          fi
+          .context/qbit-release/bin/qbitd -version
+          .context/qbit-release/bin/qbit-cli -version
+          echo "qbitd=${GITHUB_WORKSPACE}/.context/qbit-release/bin/qbitd" >> "$GITHUB_OUTPUT"
+          echo "qbit_cli=${GITHUB_WORKSPACE}/.context/qbit-release/bin/qbit-cli" >> "$GITHUB_OUTPUT"
+      - name: Install qbit build dependencies
+        if: steps.qbit-harness-source.outputs.mode == 'source'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            libboost-dev \
+            libevent-dev \
+            libsqlite3-dev \
+            pkg-config \
+            python3
+      - name: Read qbit contract ref
+        if: steps.qbit-harness-source.outputs.mode == 'source'
+        id: qbit-contract
+        run: |
+          qbit_commit="$(python3 - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          contract = pathlib.Path("doc/qbit-contract.md").read_text()
+          match = re.search(
+              r"qbit source ref: `(?:origin/main|pinned snapshot)` at `([0-9a-f]{40})`",
+              contract,
+          )
+          if not match:
+              sys.exit(1)
+          print(match.group(1))
+          PY
+          )"
+          if [ -z "$qbit_commit" ]; then
+            echo "failed to read qbit source ref from doc/qbit-contract.md" >&2
+            exit 1
+          fi
+          echo "commit=$qbit_commit" >> "$GITHUB_OUTPUT"
+      - name: Checkout qbit source
+        if: steps.qbit-harness-source.outputs.mode == 'source'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.QBIT_SOURCE_REPO }}
+          ref: ${{ steps.qbit-contract.outputs.commit }}
+          path: .context/qbit-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Cache qbit build
+        if: steps.qbit-harness-source.outputs.mode == 'source'
+        uses: actions/cache@v4
+        with:
+          path: .context/qbit-source/build
+          key: ${{ runner.os }}-${{ runner.arch }}-qbitd-wallet-v1-${{ steps.qbit-contract.outputs.commit }}-${{ hashFiles('doc/qbit-contract.md') }}
+      - name: Check local qbit AuxPoW helper
+        if: steps.qbit-harness-source.outputs.enabled == 'true'
+        run: |
+          python3 -m py_compile scripts/qbit_auxpow.py scripts/qbit-regtest-harness.py
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import pathlib
+          spec = importlib.util.spec_from_file_location("qbit_auxpow", "scripts/qbit_auxpow.py")
+          qbit_auxpow = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(qbit_auxpow)
+          template = json.loads(pathlib.Path("tests/fixtures/qbit/rpc/regtest-qbitd-createauxblock-template.json").read_text())
+          actual = qbit_auxpow.make_valid_auxpow_from_template(
+              template,
+              parent_time=1_900_000_600,
+              expected_chain_id=qbit_auxpow.QBIT_AUXPOW_CHAIN_ID,
+          )
+          expected = pathlib.Path("tests/fixtures/qbit/auxpow/regtest-qbitd-auxpow-payload.hex").read_text().strip()
+          if actual != expected:
+              raise SystemExit("local qbit AuxPoW helper does not match promoted qbitd fixture")
+          PY
+      - name: Run qbit regtest harness from release binaries
+        if: steps.qbit-harness-source.outputs.mode == 'release'
+        run: |
+          ./scripts/qbit-regtest-harness.py \
+            --qbitd "${{ steps.qbit-release.outputs.qbitd }}" \
+            --qbit-cli "${{ steps.qbit-release.outputs.qbit_cli }}" \
+            --build-electrs \
+            --timeout 420
+      - name: Run qbit regtest harness from source build
+        if: steps.qbit-harness-source.outputs.mode == 'source'
+        run: |
+          ./scripts/qbit-regtest-harness.py \
+            --qbit-source .context/qbit-source \
+            --build-qbit \
+            --build-electrs \
+            --timeout 420
+      - name: Upload qbit harness artifacts
+        uses: actions/upload-artifact@v4
+        if: failure() && steps.qbit-harness-source.outputs.enabled == 'true'
+        with:
+          name: qbit-regtest-harness-artifacts
+          path: target/qbit-regtest-harness/
+          if-no-files-found: ignore
+          retention-days: 7
 
   clippy:
     name: Linter
-    runs-on: mempool-ci
+    runs-on: ubuntu-latest
     needs: [check]
     strategy:
+      # qbit correctness is covered by non-Liquid qbit tests and the qbitd
+      # harness job. These inherited feature combinations remain compile/lint
+      # regression coverage for upstream Bitcoin/Liquid compatibility.
       matrix: # Try all combinations of features. Some times weird things appear.
         features: [
           '',

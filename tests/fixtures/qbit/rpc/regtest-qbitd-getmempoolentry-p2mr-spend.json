@@ -1,0 +1,21 @@
+{
+  "ancestorcount": 1,
+  "ancestorsize": 3861,
+  "bip125-replaceable": true,
+  "depends": [],
+  "descendantcount": 1,
+  "descendantsize": 3861,
+  "fees": {
+    "ancestor": 3.861e-05,
+    "base": 3.861e-05,
+    "descendant": 3.861e-05,
+    "modified": 3.861e-05
+  },
+  "height": 1001,
+  "spentby": [],
+  "time": 1781636674,
+  "unbroadcast": true,
+  "vsize": 3861,
+  "weight": 3861,
+  "wtxid": "2fc440be98f6a3afa28f608381c9f41ddbbbb65b34e40ffa96dbd4a21ecf8334"
+}

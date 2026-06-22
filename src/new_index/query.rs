@@ -19,10 +19,29 @@ use crate::{
 
 const FEE_ESTIMATES_TTL: u64 = 60; // seconds
 
-const CONF_TARGETS: [u16; 28] = [
+const BITCOIN_CONF_TARGETS: [u16; 28] = [
     1u16, 2u16, 3u16, 4u16, 5u16, 6u16, 7u16, 8u16, 9u16, 10u16, 11u16, 12u16, 13u16, 14u16, 15u16,
     16u16, 17u16, 18u16, 19u16, 20u16, 21u16, 22u16, 23u16, 24u16, 25u16, 144u16, 504u16, 1008u16,
 ];
+
+// qbitd still tracks fee estimates up to 1008 blocks. With qbit's 60s aggregate
+// block target, these keys cover roughly 1 minute through 16.8 hours.
+const QBIT_CONF_TARGETS: [u16; 28] = BITCOIN_CONF_TARGETS;
+
+fn fee_estimate_targets(network: Network) -> &'static [u16] {
+    if network.is_qbit() {
+        &QBIT_CONF_TARGETS
+    } else {
+        &BITCOIN_CONF_TARGETS
+    }
+}
+
+fn relayfee_estimate_map(network: Network, relayfee: f64) -> HashMap<u16, f64> {
+    fee_estimate_targets(network)
+        .iter()
+        .map(|target| (*target, relayfee))
+        .collect()
+}
 
 pub struct Query {
     chain: Arc<ChainQuery>, // TODO: should be used as read-only
@@ -81,7 +100,7 @@ impl Query {
         {
             warn!(
                 "broadcast_raw of {txid} succeeded to broadcast \
-                but failed to add to mempool-electrs Mempool cache: {e}"
+                but failed to add to qbit-electrs mempool cache: {e}"
             );
         }
         Ok(txid)
@@ -211,6 +230,16 @@ impl Query {
     }
 
     pub fn estimate_fee_map(&self) -> HashMap<u16, f64> {
+        if self.config.network_type.is_qbit() && self.config.network_type.is_regtest() {
+            return match self.get_relayfee() {
+                Ok(relayfee) => relayfee_estimate_map(self.config.network_type, relayfee),
+                Err(err) => {
+                    warn!("failed retrieving qbit regtest relayfee: {:?}", err);
+                    HashMap::new()
+                }
+            };
+        }
+
         if let (ref cache, Some(cache_time)) = *self.cached_estimates.read().unwrap() {
             if cache_time.elapsed() < Duration::from_secs(FEE_ESTIMATES_TTL) {
                 return cache.clone();
@@ -222,7 +251,10 @@ impl Query {
     }
 
     fn update_fee_estimates(&self) {
-        match self.daemon.estimatesmartfee_batch(&CONF_TARGETS) {
+        match self
+            .daemon
+            .estimatesmartfee_batch(fee_estimate_targets(self.config.network_type))
+        {
             Ok(estimates) => {
                 *self.cached_estimates.write().unwrap() = (estimates, Some(Instant::now()));
             }
@@ -297,5 +329,33 @@ impl Query {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok((total_num, results))
+    }
+}
+
+#[cfg(all(test, not(feature = "liquid")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qbit_fee_estimate_targets_fit_qbitd_window_and_60s_blocks() {
+        let targets = fee_estimate_targets(Network::QbitTestnet4);
+
+        assert_eq!(targets.first(), Some(&1));
+        assert_eq!(targets.last(), Some(&1008));
+        assert!(targets.iter().all(|target| *target <= 1008));
+        assert_eq!(144 * 60, 8_640);
+        assert_eq!(504 * 60, 30_240);
+        assert_eq!(1008 * 60, 60_480);
+    }
+
+    #[test]
+    fn qbit_regtest_fee_estimate_map_uses_relayfee_for_all_targets() {
+        let estimates = relayfee_estimate_map(Network::QbitRegtest, 0.25);
+        let targets = fee_estimate_targets(Network::QbitRegtest);
+
+        assert_eq!(estimates.len(), targets.len());
+        assert!(targets
+            .iter()
+            .all(|target| estimates.get(target) == Some(&0.25)));
     }
 }

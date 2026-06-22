@@ -1,12 +1,16 @@
-use crate::chain::{address, BlockHash, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid};
+use crate::chain::{
+    address, BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxIn, TxOut, Txid,
+};
 use crate::config::{Config, BITCOIND_SUBVER, VERSION_STRING};
 use crate::errors;
 use crate::metrics::Metrics;
 use crate::new_index::{compute_script_hash, Query, SpendingInput, Utxo};
+#[cfg(not(feature = "liquid"))]
+use crate::qbit_address;
 use crate::util::{
     create_socket, electrum_merkle, extract_tx_prevouts, full_hash, get_innerscripts, get_tx_fee,
-    has_prevout, is_coinbase, transaction_sigop_count, BlockHeaderMeta, BlockId, FullHash,
-    ScriptToAddr, ScriptToAsm, TransactionStatus,
+    has_prevout, is_coinbase, to_asm_for_network, transaction_sigop_count, tx_size, tx_vsize,
+    tx_weight, BlockHeaderMeta, BlockId, FullHash, ScriptToAddr, TransactionStatus,
 };
 
 #[cfg(not(feature = "liquid"))]
@@ -125,6 +129,10 @@ impl BlockValue {
     }
 }
 
+fn block_header_hex(header: &BlockHeader) -> String {
+    hex::encode(encode::serialize(header))
+}
+
 /// Calculate the difficulty of a BlockHeader
 /// using Bitcoin Core code ported to Rust.
 ///
@@ -155,6 +163,8 @@ struct TransactionValue {
     vout: Vec<TxOutValue>,
     size: u32,
     weight: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vsize: Option<u32>,
     sigops: u32,
     fee: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,20 +198,39 @@ impl TransactionValue {
 
         let fee = get_tx_fee(&tx, &prevouts, config.network_type);
 
-        #[allow(clippy::unnecessary_cast)]
+        let (size, weight, vsize) = transaction_size_fields(&tx, config.network_type);
+
         Ok(TransactionValue {
             txid: tx.txid(),
-            version: tx.version as u32,
+            version: {
+                #[allow(clippy::unnecessary_cast)]
+                {
+                    tx.version as u32
+                }
+            },
             locktime: tx.lock_time,
             vin: vins,
             vout: vouts,
-            size: tx.size() as u32,
-            weight: tx.weight() as u32,
+            size,
+            weight,
+            vsize,
             sigops,
             fee,
             status: Some(TransactionStatus::from(blockid)),
         })
     }
+}
+
+fn transaction_size_fields(tx: &Transaction, network: Network) -> (u32, u32, Option<u32>) {
+    let size = tx_size(tx, network);
+    let weight = tx_weight(tx, network);
+    let vsize = if network.is_qbit() {
+        Some(tx_vsize(tx, network))
+    } else {
+        None
+    };
+
+    (size, weight, vsize)
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -242,23 +271,24 @@ impl TxInValue {
 
         let is_coinbase = is_coinbase(txin);
 
-        let innerscripts = prevout.map(|prevout| get_innerscripts(txin, prevout));
+        let innerscripts =
+            prevout.map(|prevout| get_innerscripts(txin, prevout, config.network_type));
 
         TxInValue {
             txid: txin.previous_output.txid,
             vout: txin.previous_output.vout,
             prevout: prevout.map(|prevout| TxOutValue::new(prevout, config)),
-            scriptsig_asm: txin.script_sig.to_asm(),
+            scriptsig_asm: to_asm_for_network(&txin.script_sig, config.network_type),
             witness,
 
             inner_redeemscript_asm: innerscripts
                 .as_ref()
                 .and_then(|i| i.redeem_script.as_ref())
-                .map(ScriptToAsm::to_asm),
+                .map(|script| to_asm_for_network(script, config.network_type)),
             inner_witnessscript_asm: innerscripts
                 .as_ref()
                 .and_then(|i| i.witness_script.as_ref())
-                .map(ScriptToAsm::to_asm),
+                .map(|script| to_asm_for_network(script, config.network_type)),
 
             is_coinbase,
             sequence: txin.sequence,
@@ -339,37 +369,10 @@ impl TxOutValue {
         let is_fee = txout.is_fee();
 
         let script = &txout.script_pubkey;
-        let script_asm = script.to_asm();
+        let script_asm = to_asm_for_network(script, config.network_type);
         let script_addr = script.to_address_str(config.network_type);
 
-        // TODO should the following something to put inside rust-elements lib?
-        let script_type = if is_fee {
-            "fee"
-        } else if script.is_empty() {
-            "empty"
-        } else if script.is_op_return() {
-            "op_return"
-        } else if script.is_p2pk() {
-            "p2pk"
-        } else if script.is_p2pkh() {
-            "p2pkh"
-        } else if script.is_p2sh() {
-            "p2sh"
-        } else if script.is_v0_p2wpkh() {
-            "v0_p2wpkh"
-        } else if script.is_v0_p2wsh() {
-            "v0_p2wsh"
-        } else if is_v1_p2tr(script) {
-            "v1_p2tr"
-        } else if is_anchor(script) {
-            "anchor"
-        } else if script.is_provably_unspendable() {
-            "provably_unspendable"
-        } else if is_bare_multisig(script) {
-            "multisig"
-        } else {
-            "unknown"
-        };
+        let script_type = scriptpubkey_type(script, config.network_type, is_fee);
 
         #[cfg(feature = "liquid")]
         let pegout = PegoutValue::from_txout(txout, config.network_type, config.parent_network);
@@ -390,6 +393,49 @@ impl TxOutValue {
             pegout,
         }
     }
+}
+
+fn scriptpubkey_type(script: &Script, network: Network, is_fee: bool) -> &'static str {
+    // TODO should the following something to put inside rust-elements lib?
+    if is_fee {
+        "fee"
+    } else if script.is_empty() {
+        "empty"
+    } else if script.is_op_return() {
+        "op_return"
+    } else if script.is_p2pk() {
+        "p2pk"
+    } else if script.is_p2pkh() {
+        "p2pkh"
+    } else if script.is_p2sh() {
+        "p2sh"
+    } else if script.is_v0_p2wpkh() {
+        "v0_p2wpkh"
+    } else if script.is_v0_p2wsh() {
+        "v0_p2wsh"
+    } else if is_qbit_p2mr(script, network) {
+        "v2_p2mr"
+    } else if is_v1_p2tr(script) {
+        "v1_p2tr"
+    } else if is_anchor(script) {
+        "anchor"
+    } else if script.is_provably_unspendable() {
+        "provably_unspendable"
+    } else if is_bare_multisig(script) {
+        "multisig"
+    } else {
+        "unknown"
+    }
+}
+
+#[cfg(not(feature = "liquid"))]
+fn is_qbit_p2mr(script: &Script, network: Network) -> bool {
+    network.is_qbit() && qbit_address::p2mr_program_from_script(script).is_some()
+}
+
+#[cfg(feature = "liquid")]
+fn is_qbit_p2mr(_script: &Script, _network: Network) -> bool {
+    false
 }
 fn is_v1_p2tr(script: &Script) -> bool {
     script.len() == 34
@@ -809,7 +855,7 @@ fn handle_request(
                 .get_block_header(&hash)
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
 
-            let header_hex = hex::encode(encode::serialize(&header));
+            let header_hex = block_header_hex(&header);
             http_message(StatusCode::OK, header_hex, TTL_LONG)
         }
         (&Method::GET, Some(&"block"), Some(hash), Some(&"raw"), None, None) => {
@@ -2007,6 +2053,12 @@ fn to_scripthash(
 
 fn address_to_scripthash(addr: &str, network: Network) -> Result<FullHash, HttpError> {
     #[cfg(not(feature = "liquid"))]
+    if network.is_qbit() {
+        let script = qbit_address::script_pubkey_from_address(addr, network)?;
+        return Ok(compute_script_hash(&script));
+    }
+
+    #[cfg(not(feature = "liquid"))]
     let addr = address::Address::from_str(addr)?;
     #[cfg(feature = "liquid")]
     let addr = address::Address::parse_with_params(addr, network.address_params())?;
@@ -2097,6 +2149,12 @@ impl From<bitcoin::util::address::Error> for HttpError {
         HttpError::from("Invalid Bitcoin address".to_string())
     }
 }
+#[cfg(not(feature = "liquid"))]
+impl From<qbit_address::Error> for HttpError {
+    fn from(e: qbit_address::Error) -> Self {
+        HttpError::from(e.to_string())
+    }
+}
 impl From<errors::Error> for HttpError {
     fn from(e: errors::Error) -> Self {
         warn!("errors::Error: {:?}", e);
@@ -2132,9 +2190,50 @@ impl From<address::AddressError> for HttpError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "liquid"))]
+    use crate::chain::{Network, Script, Transaction};
+    #[cfg(not(feature = "liquid"))]
+    use crate::new_index::compute_script_hash;
+    #[cfg(not(feature = "liquid"))]
+    use crate::qbit_codec::{deserialize_block, PURE_BLOCK_HEADER_LEN};
     use crate::rest::HttpError;
+    #[cfg(not(feature = "liquid"))]
+    use bitcoin::consensus::encode::deserialize;
     use serde_json::Value;
     use std::collections::HashMap;
+
+    #[cfg(not(feature = "liquid"))]
+    fn qbit_witness_fixture_tx() -> Transaction {
+        let hex = include_str!("../tests/fixtures/qbit/transactions/regtest-witness-tx.hex");
+        let raw = hex::decode(hex.split_whitespace().collect::<String>()).unwrap();
+        deserialize(&raw).expect("qbit witness fixture should parse")
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    fn fixture_hex_bytes(hex: &str) -> Vec<u8> {
+        hex::decode(hex.split_whitespace().collect::<String>()).unwrap()
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    fn qbit_auxpow_fixture_block_bytes() -> Vec<u8> {
+        fixture_hex_bytes(include_str!(
+            "../tests/fixtures/qbit/blocks/regtest-qbitd-auxpow-block.hex"
+        ))
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    fn qbit_auxpow_pure_header_bytes() -> Vec<u8> {
+        fixture_hex_bytes(include_str!(
+            "../tests/fixtures/qbit/headers/regtest-qbitd-auxpow-header.hex"
+        ))
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    fn qbit_auxpow_extended_header_bytes() -> Vec<u8> {
+        fixture_hex_bytes(include_str!(
+            "../tests/fixtures/qbit/headers/regtest-qbitd-auxpow-extended-header.hex"
+        ))
+    }
 
     #[test]
     fn test_parse_query_param() {
@@ -2196,6 +2295,116 @@ mod tests {
             .ok_or(HttpError::from("notexist absent or not a u64".to_string()));
 
         assert!(err.is_err());
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    #[test]
+    fn qbit_p2mr_address_to_scripthash_uses_raw_script_bytes() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/qbit/addresses/testnet4-p2mr-zero-program.json"
+        ))
+        .expect("qbit address fixture should parse");
+        let address = fixture["p2mr"]["address"]
+            .as_str()
+            .expect("address should be a string");
+        let script = Script::from(
+            hex::decode(
+                fixture["p2mr"]["script_pubkey_hex"]
+                    .as_str()
+                    .expect("script_pubkey_hex should be a string"),
+            )
+            .expect("script_pubkey_hex should decode"),
+        );
+
+        assert_eq!(
+            super::address_to_scripthash(address, Network::QbitTestnet4).unwrap(),
+            compute_script_hash(&script)
+        );
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    #[test]
+    fn qbit_p2mr_address_to_scripthash_rejects_wrong_network() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/qbit/addresses/testnet4-p2mr-zero-program.json"
+        ))
+        .expect("qbit address fixture should parse");
+        let address = fixture["p2mr"]["address"]
+            .as_str()
+            .expect("address should be a string");
+
+        let err = super::address_to_scripthash(address, Network::QbitRegtest).unwrap_err();
+        assert!(err.1.contains("expected qbrt, got tq"));
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    #[test]
+    fn qbit_p2mr_scriptpubkey_type_is_distinct_from_unknown_witness_v2() {
+        let p2mr = Script::from(
+            hex::decode("52200000000000000000000000000000000000000000000000000000000000000000")
+                .expect("P2MR script should decode"),
+        );
+        let mut short_witness_v2 = vec![0x52, 0x1f];
+        short_witness_v2.extend_from_slice(&[0u8; 31]);
+
+        assert_eq!(
+            super::scriptpubkey_type(&p2mr, Network::QbitTestnet4, false),
+            "v2_p2mr"
+        );
+        assert_eq!(
+            super::scriptpubkey_type(
+                &Script::from(short_witness_v2),
+                Network::QbitTestnet4,
+                false
+            ),
+            "unknown"
+        );
+        assert_eq!(
+            super::scriptpubkey_type(&p2mr, Network::Bitcoin, false),
+            "unknown"
+        );
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    #[test]
+    fn qbit_transaction_size_fields_use_wsf_1_serialized_bytes() {
+        let tx = qbit_witness_fixture_tx();
+
+        assert_eq!(
+            super::transaction_size_fields(&tx, Network::QbitRegtest),
+            (66, 66, Some(66))
+        );
+        assert_eq!(
+            super::transaction_size_fields(&tx, Network::Bitcoin),
+            (66, tx.weight() as u32, None)
+        );
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    #[test]
+    fn qbit_rest_block_header_uses_pure_80_byte_header() {
+        let raw = qbit_auxpow_fixture_block_bytes();
+        let pure_header = qbit_auxpow_pure_header_bytes();
+        let extended_header = qbit_auxpow_extended_header_bytes();
+        let block = deserialize_block(&raw).expect("qbit AuxPoW block should parse");
+
+        let header_hex = super::block_header_hex(&block.header);
+
+        assert!(block.has_auxpow());
+        assert_eq!(pure_header, raw[..PURE_BLOCK_HEADER_LEN]);
+        assert_eq!(extended_header, raw[..extended_header.len()]);
+        assert!(extended_header.starts_with(&pure_header));
+        assert_eq!(header_hex.len(), PURE_BLOCK_HEADER_LEN * 2);
+        assert_eq!(
+            header_hex,
+            hex::encode(&pure_header),
+            "REST block header endpoint exposes the pure qbit block header, not the AuxPoW payload"
+        );
+        assert_ne!(
+            header_hex,
+            hex::encode(&extended_header),
+            "REST block header endpoint must not expose qbitd's AuxPoW-extended serialized header"
+        );
     }
 
     #[test]

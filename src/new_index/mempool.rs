@@ -698,7 +698,7 @@ impl Mempool {
 #[derive(Serialize)]
 pub struct BacklogStats {
     pub count: u32,
-    pub vsize: u32,     // in virtual bytes (= weight/4)
+    pub vsize: u32,     // Bitcoin-style vbytes, or qbit serialized bytes under WSF=1
     pub total_fee: u64, // in satoshis
     pub fee_histogram: Vec<(f32, u32)>,
 }

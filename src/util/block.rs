@@ -207,6 +207,24 @@ impl HeaderList {
         (removed, reorged_tip)
     }
 
+    pub fn rollback_to(
+        &mut self,
+        tip: &BlockHash,
+    ) -> Option<(Vec<HeaderEntry>, Option<BlockHash>)> {
+        let new_len = self.header_by_blockhash(tip)?.height() + 1;
+        let mut removed = self.headers.split_off(new_len);
+        if removed.is_empty() {
+            return Some((vec![], None));
+        }
+
+        for header in &removed {
+            self.heights.remove(header.hash());
+        }
+        self.tip = *tip;
+        removed.reverse();
+        Some((removed, Some(*tip)))
+    }
+
     pub fn header_by_blockhash(&self, blockhash: &BlockHash) -> Option<&HeaderEntry> {
         let height = self.heights.get(blockhash)?;
         let header = self.headers.get(*height)?;
@@ -308,7 +326,7 @@ impl From<&BlockEntry> for BlockMeta {
     fn from(b: &BlockEntry) -> BlockMeta {
         BlockMeta {
             tx_count: b.block.txdata.len() as u32,
-            weight: b.block.weight() as u32,
+            weight: b.weight,
             size: b.size,
         }
     }
@@ -333,5 +351,172 @@ impl BlockMeta {
                 .as_f64()
                 .chain_err(|| "weight not a number")? as u32,
         })
+    }
+}
+
+#[cfg(all(test, not(feature = "liquid")))]
+mod tests {
+    use super::*;
+    use crate::chain::Block;
+    use crate::qbit_codec;
+
+    fn header(prev_blockhash: BlockHash, nonce: u32) -> BlockHeader {
+        BlockHeader {
+            version: 1,
+            prev_blockhash,
+            merkle_root: "0000000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .unwrap(),
+            time: nonce,
+            bits: 0,
+            nonce,
+        }
+    }
+
+    fn fixture_hex(path: &str) -> Vec<u8> {
+        let hex = std::fs::read_to_string(path).expect("fixture hex should be readable");
+        hex::decode(hex.split_whitespace().collect::<String>()).expect("fixture hex should decode")
+    }
+
+    fn header_list_from(headers: Vec<BlockHeader>) -> HeaderList {
+        let mut list = HeaderList::empty();
+        let ordered = list.order(headers);
+        list.apply(ordered);
+        list
+    }
+
+    #[test]
+    fn header_list_rolls_back_to_indexed_ancestor() {
+        let genesis = header(BlockHash::default(), 0);
+        let child = header(genesis.block_hash(), 1);
+        let tip = header(child.block_hash(), 2);
+        let child_hash = child.block_hash();
+        let tip_hash = tip.block_hash();
+
+        let mut headers = header_list_from(vec![genesis, child, tip]);
+
+        let (removed, rollback_tip) = headers
+            .rollback_to(&child_hash)
+            .expect("child should be an indexed ancestor");
+
+        assert_eq!(rollback_tip, Some(child_hash));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(*removed[0].hash(), tip_hash);
+        assert_eq!(*headers.tip(), child_hash);
+        assert_eq!(headers.len(), 2);
+        assert!(headers.header_by_blockhash(&tip_hash).is_none());
+    }
+
+    #[test]
+    fn header_list_rolls_back_multiple_blocks_in_old_tip_order() {
+        let genesis = header(BlockHash::default(), 0);
+        let child = header(genesis.block_hash(), 1);
+        let grandchild = header(child.block_hash(), 2);
+        let tip = header(grandchild.block_hash(), 3);
+        let child_hash = child.block_hash();
+        let grandchild_hash = grandchild.block_hash();
+        let tip_hash = tip.block_hash();
+
+        let mut headers = header_list_from(vec![genesis, child, grandchild, tip]);
+
+        let (removed, rollback_tip) = headers
+            .rollback_to(&child_hash)
+            .expect("child should be an indexed ancestor");
+
+        assert_eq!(rollback_tip, Some(child_hash));
+        assert_eq!(
+            removed
+                .iter()
+                .map(|entry| *entry.hash())
+                .collect::<Vec<_>>(),
+            vec![tip_hash, grandchild_hash]
+        );
+        assert_eq!(*headers.tip(), child_hash);
+        assert_eq!(headers.len(), 2);
+        assert!(headers.header_by_blockhash(&tip_hash).is_none());
+        assert!(headers.header_by_blockhash(&grandchild_hash).is_none());
+    }
+
+    #[test]
+    fn header_list_rolls_back_to_genesis() {
+        let genesis = header(BlockHash::default(), 0);
+        let child = header(genesis.block_hash(), 1);
+        let tip = header(child.block_hash(), 2);
+        let genesis_hash = genesis.block_hash();
+        let child_hash = child.block_hash();
+        let tip_hash = tip.block_hash();
+
+        let mut headers = header_list_from(vec![genesis, child, tip]);
+
+        let (removed, rollback_tip) = headers
+            .rollback_to(&genesis_hash)
+            .expect("genesis should be indexed");
+
+        assert_eq!(rollback_tip, Some(genesis_hash));
+        assert_eq!(
+            removed
+                .iter()
+                .map(|entry| *entry.hash())
+                .collect::<Vec<_>>(),
+            vec![tip_hash, child_hash]
+        );
+        assert_eq!(*headers.tip(), genesis_hash);
+        assert_eq!(headers.len(), 1);
+    }
+
+    #[test]
+    fn header_list_rollback_to_current_tip_is_noop() {
+        let genesis = header(BlockHash::default(), 0);
+        let tip = header(genesis.block_hash(), 1);
+        let tip_hash = tip.block_hash();
+
+        let mut headers = header_list_from(vec![genesis, tip]);
+
+        let (removed, rollback_tip) = headers
+            .rollback_to(&tip_hash)
+            .expect("tip should be indexed");
+
+        assert!(removed.is_empty());
+        assert_eq!(rollback_tip, None);
+        assert_eq!(*headers.tip(), tip_hash);
+        assert_eq!(headers.len(), 2);
+    }
+
+    #[test]
+    fn header_list_rollback_to_unknown_hash_is_none() {
+        let genesis = header(BlockHash::default(), 0);
+        let tip = header(genesis.block_hash(), 1);
+        let tip_hash = tip.block_hash();
+        let unknown_hash = header(tip_hash, 2).block_hash();
+
+        let mut headers = header_list_from(vec![genesis, tip]);
+
+        assert!(headers.rollback_to(&unknown_hash).is_none());
+        assert_eq!(*headers.tip(), tip_hash);
+        assert_eq!(headers.len(), 2);
+    }
+
+    #[test]
+    fn block_meta_uses_fetcher_supplied_weight() {
+        let raw = fixture_hex("tests/fixtures/qbit/blocks/regtest-qbitd-auxpow-block.hex");
+        let block: Block = qbit_codec::deserialize_block_as_bitcoin(&raw)
+            .expect("qbit AuxPoW block should parse")
+            .into();
+        let entry = HeaderEntry {
+            height: 0,
+            hash: block.block_hash(),
+            header: block.header,
+        };
+        let block_entry = BlockEntry {
+            weight: raw.len() as u32,
+            size: raw.len() as u32,
+            block,
+            entry,
+        };
+
+        let meta = BlockMeta::from(&block_entry);
+        assert_eq!(meta.size, raw.len() as u32);
+        assert_eq!(meta.weight, raw.len() as u32);
+        assert_ne!(meta.weight, block_entry.block.weight() as u32);
     }
 }

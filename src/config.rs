@@ -14,7 +14,7 @@ use crate::errors::*;
 #[cfg(feature = "liquid")]
 use bitcoin::Network as BNetwork;
 
-pub(crate) const APP_NAME: &str = "mempool-electrs";
+pub(crate) const APP_NAME: &str = "qbit-electrs";
 pub(crate) const ELECTRS_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const GIT_HASH: Option<&str> = option_env!("GIT_HASH");
 // This will be set only once in the Daemon::new() constructor at startup
@@ -28,6 +28,23 @@ lazy_static! {
             format!("{} {}", APP_NAME, ELECTRS_VERSION)
         }
     };
+}
+
+pub(crate) fn app_name_for_network(_network: Network) -> &'static str {
+    APP_NAME
+}
+
+pub(crate) fn version_string_for_network(network: Network) -> String {
+    let app_name = app_name_for_network(network);
+    if let Some(hash) = GIT_HASH {
+        format!("{} {}-{}", app_name, ELECTRS_VERSION, hash)
+    } else {
+        format!("{} {}", app_name, ELECTRS_VERSION)
+    }
+}
+
+fn default_electrum_banner(network: Network) -> String {
+    format!("Welcome to {}", version_string_for_network(network))
 }
 
 #[derive(Debug, Clone)]
@@ -88,11 +105,137 @@ fn str_to_socketaddr(address: &str, what: &str) -> SocketAddr {
         .unwrap()
 }
 
+fn default_daemon_port(network_type: Network) -> u16 {
+    match network_type {
+        #[cfg(not(feature = "liquid"))]
+        Network::Bitcoin => 8332,
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet => 18332,
+        #[cfg(not(feature = "liquid"))]
+        Network::Regtest => 18443,
+        #[cfg(not(feature = "liquid"))]
+        Network::Signet => 38332,
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet4 => 48332,
+        #[cfg(not(feature = "liquid"))]
+        Network::Qbit => 8352,
+        #[cfg(not(feature = "liquid"))]
+        Network::QbitTestnet4 => 48352,
+        #[cfg(not(feature = "liquid"))]
+        Network::QbitRegtest => 18452,
+
+        #[cfg(feature = "liquid")]
+        Network::Liquid => 7041,
+        #[cfg(feature = "liquid")]
+        Network::LiquidTestnet | Network::LiquidRegtest => 7040,
+    }
+}
+
+fn default_electrum_port(network_type: Network) -> u16 {
+    match network_type {
+        #[cfg(not(feature = "liquid"))]
+        Network::Bitcoin | Network::Qbit => 50001,
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet => 60001,
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet4 | Network::QbitTestnet4 => 40001,
+        #[cfg(not(feature = "liquid"))]
+        Network::Regtest | Network::QbitRegtest => 60401,
+        #[cfg(not(feature = "liquid"))]
+        Network::Signet => 60601,
+
+        #[cfg(feature = "liquid")]
+        Network::Liquid => 51000,
+        #[cfg(feature = "liquid")]
+        Network::LiquidTestnet => 51301,
+        #[cfg(feature = "liquid")]
+        Network::LiquidRegtest => 51401,
+    }
+}
+
+fn default_http_port(network_type: Network) -> u16 {
+    match network_type {
+        #[cfg(not(feature = "liquid"))]
+        Network::Bitcoin | Network::Qbit => 3000,
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet => 3001,
+        #[cfg(not(feature = "liquid"))]
+        Network::Regtest | Network::QbitRegtest => 3002,
+        #[cfg(not(feature = "liquid"))]
+        Network::Signet => 3003,
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet4 | Network::QbitTestnet4 => 3004,
+
+        #[cfg(feature = "liquid")]
+        Network::Liquid => 3000,
+        #[cfg(feature = "liquid")]
+        Network::LiquidTestnet => 3001,
+        #[cfg(feature = "liquid")]
+        Network::LiquidRegtest => 3002,
+    }
+}
+
+fn default_monitoring_port(network_type: Network) -> u16 {
+    match network_type {
+        #[cfg(not(feature = "liquid"))]
+        Network::Bitcoin | Network::Qbit => 4224,
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet => 14224,
+        #[cfg(not(feature = "liquid"))]
+        Network::Regtest | Network::QbitRegtest => 24224,
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet4 | Network::QbitTestnet4 => 44224,
+        #[cfg(not(feature = "liquid"))]
+        Network::Signet => 54224,
+
+        #[cfg(feature = "liquid")]
+        Network::Liquid => 34224,
+        #[cfg(feature = "liquid")]
+        Network::LiquidTestnet => 44324,
+        #[cfg(feature = "liquid")]
+        Network::LiquidRegtest => 44224,
+    }
+}
+
+fn default_daemon_dir(network_type: Network, mut home: PathBuf) -> PathBuf {
+    #[cfg(not(feature = "liquid"))]
+    if network_type.is_qbit() {
+        home.push(".qbit");
+    } else {
+        home.push(".bitcoin");
+    }
+
+    #[cfg(feature = "liquid")]
+    home.push(".bitcoin");
+
+    match network_type {
+        #[cfg(not(feature = "liquid"))]
+        Network::Bitcoin | Network::Qbit => (),
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet => home.push("testnet3"),
+        #[cfg(not(feature = "liquid"))]
+        Network::Testnet4 | Network::QbitTestnet4 => home.push("testnet4"),
+        #[cfg(not(feature = "liquid"))]
+        Network::Regtest | Network::QbitRegtest => home.push("regtest"),
+        #[cfg(not(feature = "liquid"))]
+        Network::Signet => home.push("signet"),
+
+        #[cfg(feature = "liquid")]
+        Network::Liquid => home.push("liquidv1"),
+        #[cfg(feature = "liquid")]
+        Network::LiquidTestnet => home.push("liquidtestnet"),
+        #[cfg(feature = "liquid")]
+        Network::LiquidRegtest => home.push("liquidregtest"),
+    }
+
+    home
+}
+
 impl Config {
     pub fn from_args() -> Config {
         let network_help = format!("Select network type ({})", Network::names().join(", "));
 
-        let args = App::new("Mempool Electrum Rust Server")
+        let args = App::new(APP_NAME)
             .version(crate_version!())
             .arg(
                 Arg::with_name("version")
@@ -119,19 +262,19 @@ impl Config {
             .arg(
                 Arg::with_name("daemon_dir")
                     .long("daemon-dir")
-                    .help("Data directory of Bitcoind (default: ~/.bitcoin/)")
+                    .help("Data directory of the backing daemon (default: ~/.bitcoin/ for Bitcoin networks, ~/.qbit/ for qbit networks)")
                     .takes_value(true),
             )
             .arg(
                 Arg::with_name("blocks_dir")
                     .long("blocks-dir")
-                    .help("Analogous to bitcoind's -blocksdir option, this specifies the directory containing the raw blocks files (blk*.dat) (default: ~/.bitcoin/blocks/)")
+                    .help("Analogous to the daemon's -blocksdir option, this specifies the directory containing the raw blocks files (blk*.dat)")
                     .takes_value(true),
             )
             .arg(
                 Arg::with_name("cookie")
                     .long("cookie")
-                    .help("JSONRPC authentication cookie ('USER:PASSWORD', default: read from ~/.bitcoin/.cookie)")
+                    .help("JSONRPC authentication cookie ('USER:PASSWORD', default: read from the daemon data directory)")
                     .takes_value(true),
             )
             .arg(
@@ -149,25 +292,25 @@ impl Config {
             .arg(
                 Arg::with_name("electrum_rpc_addr")
                     .long("electrum-rpc-addr")
-                    .help("Electrum server JSONRPC 'addr:port' to listen on (default: '127.0.0.1:50001' for mainnet, '127.0.0.1:60001' for testnet and '127.0.0.1:60401' for regtest)")
+                    .help("Electrum server JSONRPC 'addr:port' to listen on (Bitcoin defaults: 50001 mainnet, 60001 testnet, 40001 testnet4, 60401 regtest, 60601 signet; qbit defaults: 50001 mainnet, 40001 testnet4, 60401 regtest)")
                     .takes_value(true),
             )
             .arg(
                 Arg::with_name("http_addr")
                     .long("http-addr")
-                    .help("HTTP server 'addr:port' to listen on (default: '127.0.0.1:3000' for mainnet, '127.0.0.1:3001' for testnet and '127.0.0.1:3002' for regtest)")
+                    .help("HTTP server 'addr:port' to listen on (Bitcoin defaults: 3000 mainnet, 3001 testnet, 3004 testnet4, 3002 regtest, 3003 signet; qbit defaults: 3000 mainnet, 3004 testnet4, 3002 regtest)")
                     .takes_value(true),
             )
             .arg(
                 Arg::with_name("daemon_rpc_addr")
                     .long("daemon-rpc-addr")
-                    .help("Bitcoin daemon JSONRPC 'addr:port' to connect (default: 127.0.0.1:8332 for mainnet, 127.0.0.1:18332 for testnet and 127.0.0.1:18443 for regtest)")
+                    .help("Backing daemon JSONRPC 'addr:port' to connect (Bitcoin defaults: 8332 mainnet, 18332 testnet, 48332 testnet4, 18443 regtest, 38332 signet; qbit defaults: 8352 mainnet, 48352 testnet4, 18452 regtest)")
                     .takes_value(true),
             )
             .arg(
                 Arg::with_name("monitoring_addr")
                     .long("monitoring-addr")
-                    .help("Prometheus monitoring 'addr:port' to listen on (default: 127.0.0.1:4224 for mainnet, 127.0.0.1:14224 for testnet and 127.0.0.1:24224 for regtest)")
+                    .help("Prometheus monitoring 'addr:port' to listen on (Bitcoin defaults: 4224 mainnet, 14224 testnet, 44224 testnet4, 24224 regtest, 54224 signet; qbit defaults: 4224 mainnet, 44224 testnet4, 24224 regtest)")
                     .takes_value(true),
             )
             .arg(
@@ -315,12 +458,12 @@ impl Config {
         let args = args.arg(
                 Arg::with_name("electrum_public_hosts")
                     .long("electrum-public-hosts")
-                    .help("A dictionary of hosts where the Electrum server can be reached at. Required to enable server discovery. See https://electrumx.readthedocs.io/en/latest/protocol-methods.html#server-features")
+                    .help("A dictionary of hosts where the Electrum server can be reached at. Required to enable server discovery. Ignored for qbit networks in v1. See https://electrumx.readthedocs.io/en/latest/protocol-methods.html#server-features")
                     .takes_value(true)
             ).arg(
                 Arg::with_name("electrum_announce")
                     .long("electrum-announce")
-                    .help("Announce the Electrum server to other servers")
+                    .help("Announce the Electrum server to other servers. Ignored for qbit networks in v1.")
             ).arg(
             Arg::with_name("tor_proxy")
                 .long("tor-proxy")
@@ -342,7 +485,7 @@ impl Config {
             .filter(|s| !s.is_empty())
             .map(|s| u32::from_str_radix(s, 16).expect("invalid network magic"));
         let db_dir = Path::new(m.value_of("db_dir").unwrap_or("./db"));
-        let db_path = db_dir.join(network_name);
+        let db_path = db_dir.join(network_type.canonical_name());
 
         #[cfg(feature = "liquid")]
         let parent_network = m
@@ -357,85 +500,15 @@ impl Config {
         #[cfg(feature = "liquid")]
         let asset_db_path = m.value_of("asset_db_path").map(PathBuf::from);
 
-        let default_daemon_port = match network_type {
-            #[cfg(not(feature = "liquid"))]
-            Network::Bitcoin => 8332,
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet => 18332,
-            #[cfg(not(feature = "liquid"))]
-            Network::Regtest => 18443,
-            #[cfg(not(feature = "liquid"))]
-            Network::Signet => 38332,
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet4 => 48332,
-
-            #[cfg(feature = "liquid")]
-            Network::Liquid => 7041,
-            #[cfg(feature = "liquid")]
-            Network::LiquidTestnet | Network::LiquidRegtest => 7040,
-        };
-        let default_electrum_port = match network_type {
-            #[cfg(not(feature = "liquid"))]
-            Network::Bitcoin => 50001,
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet => 60001,
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet4 => 40001,
-            #[cfg(not(feature = "liquid"))]
-            Network::Regtest => 60401,
-            #[cfg(not(feature = "liquid"))]
-            Network::Signet => 60601,
-
-            #[cfg(feature = "liquid")]
-            Network::Liquid => 51000,
-            #[cfg(feature = "liquid")]
-            Network::LiquidTestnet => 51301,
-            #[cfg(feature = "liquid")]
-            Network::LiquidRegtest => 51401,
-        };
-        let default_http_port = match network_type {
-            #[cfg(not(feature = "liquid"))]
-            Network::Bitcoin => 3000,
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet => 3001,
-            #[cfg(not(feature = "liquid"))]
-            Network::Regtest => 3002,
-            #[cfg(not(feature = "liquid"))]
-            Network::Signet => 3003,
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet4 => 3004,
-
-            #[cfg(feature = "liquid")]
-            Network::Liquid => 3000,
-            #[cfg(feature = "liquid")]
-            Network::LiquidTestnet => 3001,
-            #[cfg(feature = "liquid")]
-            Network::LiquidRegtest => 3002,
-        };
-        let default_monitoring_port = match network_type {
-            #[cfg(not(feature = "liquid"))]
-            Network::Bitcoin => 4224,
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet => 14224,
-            #[cfg(not(feature = "liquid"))]
-            Network::Regtest => 24224,
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet4 => 44224,
-            #[cfg(not(feature = "liquid"))]
-            Network::Signet => 54224,
-
-            #[cfg(feature = "liquid")]
-            Network::Liquid => 34224,
-            #[cfg(feature = "liquid")]
-            Network::LiquidTestnet => 44324,
-            #[cfg(feature = "liquid")]
-            Network::LiquidRegtest => 44224,
-        };
+        let default_daemon_port = default_daemon_port(network_type);
+        let default_electrum_port = default_electrum_port(network_type);
+        let default_http_port = default_http_port(network_type);
+        let default_monitoring_port = default_monitoring_port(network_type);
 
         let daemon_rpc_addr: SocketAddr = str_to_socketaddr(
             m.value_of("daemon_rpc_addr")
                 .unwrap_or(&format!("127.0.0.1:{}", default_daemon_port)),
-            "Bitcoin RPC",
+            "daemon RPC",
         );
         let electrum_rpc_addr: SocketAddr = str_to_socketaddr(
             m.value_of("electrum_rpc_addr")
@@ -456,33 +529,10 @@ impl Config {
             "Prometheus monitoring",
         );
 
-        let mut daemon_dir = m
+        let daemon_dir = m
             .value_of("daemon_dir")
             .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                let mut default_dir = home_dir().expect("no homedir");
-                default_dir.push(".bitcoin");
-                default_dir
-            });
-        match network_type {
-            #[cfg(not(feature = "liquid"))]
-            Network::Bitcoin => (),
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet => daemon_dir.push("testnet3"),
-            #[cfg(not(feature = "liquid"))]
-            Network::Testnet4 => daemon_dir.push("testnet4"),
-            #[cfg(not(feature = "liquid"))]
-            Network::Regtest => daemon_dir.push("regtest"),
-            #[cfg(not(feature = "liquid"))]
-            Network::Signet => daemon_dir.push("signet"),
-
-            #[cfg(feature = "liquid")]
-            Network::Liquid => daemon_dir.push("liquidv1"),
-            #[cfg(feature = "liquid")]
-            Network::LiquidTestnet => daemon_dir.push("liquidtestnet"),
-            #[cfg(feature = "liquid")]
-            Network::LiquidRegtest => daemon_dir.push("liquidregtest"),
-        }
+            .unwrap_or_else(|| default_daemon_dir(network_type, home_dir().expect("no homedir")));
         let blocks_dir = m
             .value_of("blocks_dir")
             .map(PathBuf::from)
@@ -491,7 +541,7 @@ impl Config {
 
         let electrum_banner = m
             .value_of("electrum_banner")
-            .map_or_else(|| format!("Welcome to {}", *VERSION_STRING), |s| s.into());
+            .map_or_else(|| default_electrum_banner(network_type), |s| s.into());
 
         #[cfg(feature = "electrum-discovery")]
         let electrum_public_hosts = m
@@ -621,5 +671,59 @@ impl CookieGetter for CookieFile {
             ErrorKind::Connection(format!("failed to read cookie from {:?}", path))
         })?;
         Ok(contents)
+    }
+}
+
+#[cfg(all(test, not(feature = "liquid")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qbit_default_ports_match_contract() {
+        assert_eq!(default_daemon_port(Network::Qbit), 8352);
+        assert_eq!(default_daemon_port(Network::QbitTestnet4), 48352);
+        assert_eq!(default_daemon_port(Network::QbitRegtest), 18452);
+
+        assert_eq!(default_electrum_port(Network::Qbit), 50001);
+        assert_eq!(default_electrum_port(Network::QbitTestnet4), 40001);
+        assert_eq!(default_electrum_port(Network::QbitRegtest), 60401);
+
+        assert_eq!(default_http_port(Network::Qbit), 3000);
+        assert_eq!(default_http_port(Network::QbitTestnet4), 3004);
+        assert_eq!(default_http_port(Network::QbitRegtest), 3002);
+    }
+
+    #[test]
+    fn qbit_default_daemon_dirs_use_qbit_datadir() {
+        let home = PathBuf::from("/tmp/qbit-electrs-home");
+
+        assert_eq!(
+            default_daemon_dir(Network::Qbit, home.clone()),
+            PathBuf::from("/tmp/qbit-electrs-home/.qbit")
+        );
+        assert_eq!(
+            default_daemon_dir(Network::QbitTestnet4, home.clone()),
+            PathBuf::from("/tmp/qbit-electrs-home/.qbit/testnet4")
+        );
+        assert_eq!(
+            default_daemon_dir(Network::QbitRegtest, home.clone()),
+            PathBuf::from("/tmp/qbit-electrs-home/.qbit/regtest")
+        );
+        assert_eq!(
+            default_daemon_dir(Network::Regtest, home),
+            PathBuf::from("/tmp/qbit-electrs-home/.bitcoin/regtest")
+        );
+    }
+
+    #[test]
+    fn visible_identity_defaults_identify_qbit_electrs() {
+        assert_eq!(APP_NAME, "qbit-electrs");
+        assert_eq!(app_name_for_network(Network::Bitcoin), APP_NAME);
+        assert_eq!(app_name_for_network(Network::QbitTestnet4), APP_NAME);
+        assert!(VERSION_STRING.starts_with("qbit-electrs "));
+        assert!(version_string_for_network(Network::QbitRegtest).starts_with("qbit-electrs "));
+        assert!(
+            default_electrum_banner(Network::QbitRegtest).starts_with("Welcome to qbit-electrs ")
+        );
     }
 }

@@ -1,0 +1,1235 @@
+{
+  "schema_version": 1,
+  "contract": {
+    "document": "doc/qbit-contract.md",
+    "qbit_repository": "qbit-reference",
+    "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+    "issues": [
+      4,
+      7,
+      12,
+      13,
+      14,
+      20,
+      22
+    ],
+    "compatible_fixture_commits": [
+      {
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "scope": "qbitd-generated P2MR spend and boundary fixtures",
+        "reason": "These fixtures were generated before the testnet4 reset and AuxPoW chain-id change. P2MR address, witness, stack-boundary, WSF=1, and qbitd mempool/RPC semantics used by these fixtures are unchanged at the current contract ref; regenerate before changing any P2MR policy expectations.",
+        "fixture_ids": [
+          "regtest-qbitd-p2mr-spend-tx",
+          "regtest-qbitd-p2mr-spend-block",
+          "regtest-qbitd-getrawtransaction-p2mr-spend",
+          "regtest-qbitd-getblock-p2mr-spend",
+          "regtest-qbitd-getblockheader-p2mr-spend",
+          "regtest-qbitd-getmempoolentry-p2mr-spend",
+          "regtest-qbitd-getrawmempool-with-p2mr-spend",
+          "regtest-qbitd-p2mr-stack-16k-spend-tx",
+          "regtest-qbitd-p2mr-stack-128k-spend-tx",
+          "regtest-qbitd-p2mr-stack-item-oversize-reject-tx",
+          "regtest-qbitd-p2mr-stack-total-oversize-reject-tx",
+          "regtest-qbitd-p2mr-boundary-spends-block",
+          "regtest-qbitd-testmempoolaccept-p2mr-stack-16k",
+          "regtest-qbitd-testmempoolaccept-p2mr-stack-128k",
+          "regtest-qbitd-testmempoolaccept-p2mr-stack-item-oversize",
+          "regtest-qbitd-testmempoolaccept-p2mr-stack-total-oversize",
+          "regtest-qbitd-getmempoolentry-p2mr-stack-16k",
+          "regtest-qbitd-getmempoolentry-p2mr-stack-128k",
+          "regtest-qbitd-getrawmempool-with-p2mr-boundary-spends",
+          "regtest-qbitd-getblock-p2mr-boundary-spends",
+          "regtest-qbitd-getblockheader-p2mr-boundary-spends"
+        ]
+      }
+    ]
+  },
+  "fixtures": [
+    {
+      "id": "regtest-synthetic-witness-tx",
+      "network": "regtest",
+      "fixture_type": "transaction",
+      "path": "tests/fixtures/qbit/transactions/regtest-witness-tx.hex",
+      "source": {
+        "kind": "synthetic",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "minimal witness-bearing transaction derived from doc/qbit-contract.md"
+      },
+      "generation_command": "printf '%s\\n' '020000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000000102abcd00000000' > tests/fixtures/qbit/transactions/regtest-witness-tx.hex",
+      "txid": "cdc38c3647a0c36cdcfb26e6c8425d3aeeef3f8a3540664bd70293b71cb9883b",
+      "expected_parser_facts": {
+        "serialized_size": 66,
+        "qbit_weight": 66,
+        "witness_scale_factor": 1,
+        "input_count": 1,
+        "output_count": 1,
+        "witness_input_count": 1,
+        "witness_stack_item_count": 1,
+        "witness_item_hex": "abcd"
+      },
+      "refresh_policy": {
+        "reproduce": "The printf command must produce byte-for-byte identical hex.",
+        "diff_policy": "Any diff must update the qbit codec tests and explain the new byte-format coverage."
+      },
+      "notes": "Synthetic parser fixture; not a consensus-valid spend."
+    },
+    {
+      "id": "regtest-synthetic-non-auxpow-block",
+      "network": "regtest",
+      "fixture_type": "block",
+      "path": "tests/fixtures/qbit/blocks/regtest-synthetic-non-auxpow-block.hex",
+      "source": {
+        "kind": "synthetic",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "minimal non-AuxPoW block envelope derived from doc/qbit-contract.md"
+      },
+      "generation_command": "printf '%s\\n' '010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001020000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000000102abcd00000000' > tests/fixtures/qbit/blocks/regtest-synthetic-non-auxpow-block.hex",
+      "blockhash": "4ddd9f0855d58a375be5a763e5f51ece853d30525fcd9a3e477c2194fedb549f",
+      "expected_parser_facts": {
+        "serialized_size": 147,
+        "qbit_weight": 147,
+        "witness_scale_factor": 1,
+        "pure_header_bytes": 80,
+        "auxpow": false,
+        "tx_count": 1,
+        "tx_vector_offset": 80
+      },
+      "refresh_policy": {
+        "reproduce": "The printf command must produce byte-for-byte identical hex.",
+        "diff_policy": "Any diff must update the qbit codec tests and explain the new byte-format coverage."
+      },
+      "notes": "Synthetic parser fixture; the all-zero merkle root and target fields are not intended as a consensus-valid block."
+    },
+    {
+      "id": "regtest-synthetic-auxpow-block",
+      "network": "regtest",
+      "fixture_type": "block",
+      "path": "tests/fixtures/qbit/blocks/regtest-synthetic-auxpow-block.hex",
+      "source": {
+        "kind": "synthetic",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "minimal AuxPoW block envelope derived from qbit CAuxPow serialization"
+      },
+      "generation_command": "printf '%s\\n' '00c1582f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001020000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff010000000000000000000102abcd00000000' > tests/fixtures/qbit/blocks/regtest-synthetic-auxpow-block.hex",
+      "blockhash": "53ed8f41824a0337c904dc8160e2ca2f1eca20fa82c1a79ca57b8391a233fae8",
+      "expected_parser_facts": {
+        "serialized_size": 297,
+        "qbit_weight": 297,
+        "witness_scale_factor": 1,
+        "pure_header_bytes": 80,
+        "auxpow": true,
+        "auxpow_flag": "0x00000100",
+        "chain_id": 31430,
+        "auxpow_payload_bytes": 150,
+        "auxpow_payload_order": [
+          "coinbase_tx_no_witness",
+          "coinbase_merkle_branch",
+          "coinbase_branch_index",
+          "chain_merkle_branch",
+          "chain_index",
+          "parent_block_pure_header"
+        ],
+        "coinbase_branch_index": 0,
+        "chain_index": 0,
+        "parent_block_header_bytes": 80,
+        "tx_count": 1,
+        "tx_vector_offset": 230
+      },
+      "refresh_policy": {
+        "reproduce": "The printf command must produce byte-for-byte identical hex.",
+        "diff_policy": "Replace with qbitd-generated AuxPoW bytes when deterministic parent-chain generation is available."
+      },
+      "notes": "Synthetic parser fixture. A real qbitd-generated AuxPoW fixture is deferred because deterministic generation requires parent-chain merge-mining orchestration outside this repo's current fixture harness."
+    },
+    {
+      "id": "mainnet-p2mr-zero-program-address",
+      "network": "mainnet",
+      "fixture_type": "address",
+      "path": "tests/fixtures/qbit/addresses/mainnet-p2mr-zero-program.json",
+      "source": {
+        "kind": "derived",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit src/key_io.cpp WitnessV2P2MR and test_framework/segwit_addr.py"
+      },
+      "generation_command": "python3 tests/fixtures/qbit/scripts/generate_qbit_fixtures.py --write --check",
+      "address": "qb1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqm5lumh",
+      "script": "52200000000000000000000000000000000000000000000000000000000000000000",
+      "expected_parser_facts": {
+        "script_pubkey_shape": "OP_2 <32-byte merkle-root program>",
+        "witness_version": 2,
+        "witness_program_bytes": 32,
+        "network_hrp": "qb",
+        "bech32_encoding": "bech32m",
+        "wrong_network_rejection_vectors": [
+          "tq1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdagu6k",
+          "qbrt1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwztzna"
+        ]
+      },
+      "refresh_policy": {
+        "reproduce": "The generator must produce byte-for-byte identical JSON.",
+        "diff_policy": "Any address diff must update qbit source refs and P2MR address tests."
+      },
+      "notes": "Derived from qbit Bech32m witness-v2 P2MR encoding for a zero 32-byte Merkle-root program."
+    },
+    {
+      "id": "testnet4-p2mr-zero-program-address",
+      "network": "testnet4",
+      "fixture_type": "address",
+      "path": "tests/fixtures/qbit/addresses/testnet4-p2mr-zero-program.json",
+      "source": {
+        "kind": "derived",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit src/key_io.cpp WitnessV2P2MR and test_framework/segwit_addr.py"
+      },
+      "generation_command": "python3 tests/fixtures/qbit/scripts/generate_qbit_fixtures.py --write --check",
+      "address": "tq1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdagu6k",
+      "script": "52200000000000000000000000000000000000000000000000000000000000000000",
+      "expected_parser_facts": {
+        "script_pubkey_shape": "OP_2 <32-byte merkle-root program>",
+        "witness_version": 2,
+        "witness_program_bytes": 32,
+        "network_hrp": "tq",
+        "bech32_encoding": "bech32m",
+        "wrong_network_rejection_vectors": [
+          "qb1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqm5lumh",
+          "qbrt1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwztzna"
+        ]
+      },
+      "refresh_policy": {
+        "reproduce": "The generator must produce byte-for-byte identical JSON.",
+        "diff_policy": "Any address diff must update qbit source refs and P2MR address tests."
+      },
+      "notes": "Derived from qbit Bech32m witness-v2 P2MR encoding for a zero 32-byte Merkle-root program."
+    },
+    {
+      "id": "regtest-p2mr-zero-program-address",
+      "network": "regtest",
+      "fixture_type": "address",
+      "path": "tests/fixtures/qbit/addresses/regtest-p2mr-zero-program.json",
+      "source": {
+        "kind": "derived",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit src/key_io.cpp WitnessV2P2MR and test_framework/segwit_addr.py"
+      },
+      "generation_command": "python3 tests/fixtures/qbit/scripts/generate_qbit_fixtures.py --write --check",
+      "address": "qbrt1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqwztzna",
+      "script": "52200000000000000000000000000000000000000000000000000000000000000000",
+      "expected_parser_facts": {
+        "script_pubkey_shape": "OP_2 <32-byte merkle-root program>",
+        "witness_version": 2,
+        "witness_program_bytes": 32,
+        "network_hrp": "qbrt",
+        "bech32_encoding": "bech32m",
+        "wrong_network_rejection_vectors": [
+          "qb1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqm5lumh",
+          "tq1zqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdagu6k"
+        ]
+      },
+      "refresh_policy": {
+        "reproduce": "The generator must produce byte-for-byte identical JSON.",
+        "diff_policy": "Any address diff must update qbit source refs and P2MR address tests."
+      },
+      "notes": "Derived from qbit Bech32m witness-v2 P2MR encoding for a zero 32-byte Merkle-root program."
+    },
+    {
+      "id": "regtest-p2mr-zero-program-history-row",
+      "network": "regtest",
+      "fixture_type": "db-row",
+      "path": "tests/fixtures/qbit/db-rows/regtest-p2mr-zero-program-history.json",
+      "source": {
+        "kind": "derived",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "electrs non-liquid TxHistoryRow schema with qbit P2MR script"
+      },
+      "generation_command": "python3 tests/fixtures/qbit/scripts/generate_qbit_fixtures.py --write --check",
+      "script": "52200000000000000000000000000000000000000000000000000000000000000000",
+      "expected_parser_facts": {
+        "row_type": "TxHistoryRow",
+        "history_kind": "funding",
+        "script_hash": "379bfa9706fc3e3b0dbe80ff6615a46c781ca7124daf93e513c0f77f5bb12257",
+        "confirmed_height": 2,
+        "tx_position": 3,
+        "value_sat": 7
+      },
+      "refresh_policy": {
+        "reproduce": "The generator must produce byte-for-byte identical JSON.",
+        "diff_policy": "Any diff must update the non-liquid TxHistoryRow fixture test."
+      },
+      "notes": "Semantic fixture consumed by a non-liquid DB-row round-trip test."
+    },
+    {
+      "id": "regtest-qbitd-p2mr-spend-tx",
+      "network": "regtest",
+      "fixture_type": "transaction",
+      "path": "tests/fixtures/qbit/transactions/regtest-qbitd-p2mr-spend.hex",
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "local qbit regtest wallet and RPC samples generated by scripts/qbit-regtest-harness.py",
+        "deterministic_key_material": "qbitd wallet-generated P2MR keys; txids and block hashes may vary between runs, but this committed bundle records exact reviewed values"
+      },
+      "generation_command": "./scripts/qbit-regtest-harness.py --qbit-source auto --keep-artifacts --export-qbit-fixtures --timeout 300",
+      "txid": "4d4200fcaed9ad53c9747f510461e68158539d44f1d736dfc75db32f619fe0ce",
+      "address": "qbrt1z2pewsxz92hk7zl2tjjj3wcy0kh4ztdgy5akhle5dqsxylafryusq5gjgjd",
+      "expected_parser_facts": {
+        "serialized_size": 3861,
+        "qbit_weight": 3861,
+        "witness_scale_factor": 1,
+        "input_count": 1,
+        "p2mr_witness": true,
+        "spent_prevout_txid": "3c0fa3df93b99eec644d71d9eec6ffd6b79ee7a830cbff5b0bcbcb7a64b2ec47",
+        "spent_prevout_vout": 0,
+        "recipient_vout": 1,
+        "recipient_value_sats": 100000000,
+        "confirmed_height": 1002
+      },
+      "refresh_policy": {
+        "reproduce": "Run the qbit regtest harness with --export-qbit-fixtures and review the generated manifest for exact qbitd values.",
+        "diff_policy": "Wallet-generated txids may change. Commit only reviewed qbitd output and keep the qbit commit/source metadata."
+      },
+      "notes": "Promoted qbitd-generated P2MR witness spend from target/qbit-regtest-harness/20260616-190427-28614."
+    },
+    {
+      "id": "regtest-qbitd-p2mr-spend-block",
+      "network": "regtest",
+      "fixture_type": "block",
+      "path": "tests/fixtures/qbit/blocks/regtest-qbitd-p2mr-spend-block.hex",
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "local qbit regtest wallet and RPC samples generated by scripts/qbit-regtest-harness.py",
+        "deterministic_key_material": "qbitd wallet-generated P2MR keys; txids and block hashes may vary between runs, but this committed bundle records exact reviewed values"
+      },
+      "generation_command": "./scripts/qbit-regtest-harness.py --qbit-source auto --keep-artifacts --export-qbit-fixtures --timeout 300",
+      "height": 1002,
+      "blockhash": "62fd848c6dbaba8a1a8826464263836d437417b824359dd80d53185311c95763",
+      "expected_parser_facts": {
+        "serialized_size": 4123,
+        "qbit_weight": 4123,
+        "witness_scale_factor": 1,
+        "pure_header_bytes": 80,
+        "auxpow": false,
+        "tx_count": 2,
+        "contains_txid": "4d4200fcaed9ad53c9747f510461e68158539d44f1d736dfc75db32f619fe0ce"
+      },
+      "refresh_policy": {
+        "reproduce": "Run the qbit regtest harness with --export-qbit-fixtures and review the generated block hash and tx list.",
+        "diff_policy": "Block hashes may change with regenerated wallet data. Commit only reviewed qbitd output."
+      },
+      "notes": "Promoted qbitd-generated spend-confirming block captured before reorg checks."
+    },
+    {
+      "id": "regtest-qbitd-getrawtransaction-p2mr-spend",
+      "network": "regtest",
+      "fixture_type": "rpc",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getrawtransaction-p2mr-spend.json",
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "local qbit regtest wallet and RPC samples generated by scripts/qbit-regtest-harness.py",
+        "deterministic_key_material": "qbitd wallet-generated P2MR keys; txids and block hashes may vary between runs, but this committed bundle records exact reviewed values"
+      },
+      "generation_command": "./scripts/qbit-regtest-harness.py --qbit-source auto --keep-artifacts --export-qbit-fixtures --timeout 300",
+      "txid": "4d4200fcaed9ad53c9747f510461e68158539d44f1d736dfc75db32f619fe0ce",
+      "expected_parser_facts": {
+        "method": "getrawtransaction",
+        "verbosity": true,
+        "txid": "4d4200fcaed9ad53c9747f510461e68158539d44f1d736dfc75db32f619fe0ce",
+        "blockhash": "62fd848c6dbaba8a1a8826464263836d437417b824359dd80d53185311c95763",
+        "confirmed_height": 1002
+      },
+      "refresh_policy": {
+        "reproduce": "Regenerate with --export-qbit-fixtures.",
+        "diff_policy": "Review qbitd RPC JSON shape changes before promotion."
+      },
+      "notes": "Verbose qbitd transaction RPC sample for the promoted P2MR spend."
+    },
+    {
+      "id": "regtest-qbitd-getblock-p2mr-spend",
+      "network": "regtest",
+      "fixture_type": "rpc",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getblock-p2mr-spend.json",
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "local qbit regtest wallet and RPC samples generated by scripts/qbit-regtest-harness.py",
+        "deterministic_key_material": "qbitd wallet-generated P2MR keys; txids and block hashes may vary between runs, but this committed bundle records exact reviewed values"
+      },
+      "generation_command": "./scripts/qbit-regtest-harness.py --qbit-source auto --keep-artifacts --export-qbit-fixtures --timeout 300",
+      "height": 1002,
+      "blockhash": "62fd848c6dbaba8a1a8826464263836d437417b824359dd80d53185311c95763",
+      "expected_parser_facts": {
+        "method": "getblock",
+        "verbosity": 1,
+        "tx_count": 2,
+        "contains_txid": "4d4200fcaed9ad53c9747f510461e68158539d44f1d736dfc75db32f619fe0ce"
+      },
+      "refresh_policy": {
+        "reproduce": "Regenerate with --export-qbit-fixtures.",
+        "diff_policy": "Review qbitd RPC JSON shape changes before promotion."
+      },
+      "notes": "qbitd block RPC sample for the promoted P2MR spend block."
+    },
+    {
+      "id": "regtest-qbitd-getblockheader-p2mr-spend",
+      "network": "regtest",
+      "fixture_type": "rpc",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getblockheader-p2mr-spend.json",
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "local qbit regtest wallet and RPC samples generated by scripts/qbit-regtest-harness.py",
+        "deterministic_key_material": "qbitd wallet-generated P2MR keys; txids and block hashes may vary between runs, but this committed bundle records exact reviewed values"
+      },
+      "generation_command": "./scripts/qbit-regtest-harness.py --qbit-source auto --keep-artifacts --export-qbit-fixtures --timeout 300",
+      "height": 1002,
+      "blockhash": "62fd848c6dbaba8a1a8826464263836d437417b824359dd80d53185311c95763",
+      "expected_parser_facts": {
+        "method": "getblockheader",
+        "verbosity": true,
+        "header_bytes": 80,
+        "hash": "62fd848c6dbaba8a1a8826464263836d437417b824359dd80d53185311c95763"
+      },
+      "refresh_policy": {
+        "reproduce": "Regenerate with --export-qbit-fixtures.",
+        "diff_policy": "Review qbitd RPC JSON shape changes before promotion."
+      },
+      "notes": "qbitd header RPC sample; REST/Electrum expose the pure 80-byte header."
+    },
+    {
+      "id": "regtest-qbitd-getmempoolentry-p2mr-spend",
+      "network": "regtest",
+      "fixture_type": "rpc",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getmempoolentry-p2mr-spend.json",
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "local qbit regtest wallet and RPC samples generated by scripts/qbit-regtest-harness.py",
+        "deterministic_key_material": "qbitd wallet-generated P2MR keys; txids and block hashes may vary between runs, but this committed bundle records exact reviewed values"
+      },
+      "generation_command": "./scripts/qbit-regtest-harness.py --qbit-source auto --keep-artifacts --export-qbit-fixtures --timeout 300",
+      "txid": "4d4200fcaed9ad53c9747f510461e68158539d44f1d736dfc75db32f619fe0ce",
+      "expected_parser_facts": {
+        "method": "getmempoolentry",
+        "txid": "4d4200fcaed9ad53c9747f510461e68158539d44f1d736dfc75db32f619fe0ce",
+        "vsize_policy": "qbit WSF=1 witness-inclusive serialized size"
+      },
+      "refresh_policy": {
+        "reproduce": "Regenerate with --export-qbit-fixtures.",
+        "diff_policy": "Review qbitd mempool JSON shape changes before promotion."
+      },
+      "notes": "qbitd mempool entry captured before the promoted P2MR spend is mined."
+    },
+    {
+      "id": "regtest-qbitd-getrawmempool-with-p2mr-spend",
+      "network": "regtest",
+      "fixture_type": "rpc",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getrawmempool-with-p2mr-spend.json",
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "local qbit regtest wallet and RPC samples generated by scripts/qbit-regtest-harness.py",
+        "deterministic_key_material": "qbitd wallet-generated P2MR keys; txids and block hashes may vary between runs, but this committed bundle records exact reviewed values"
+      },
+      "generation_command": "./scripts/qbit-regtest-harness.py --qbit-source auto --keep-artifacts --export-qbit-fixtures --timeout 300",
+      "txid": "4d4200fcaed9ad53c9747f510461e68158539d44f1d736dfc75db32f619fe0ce",
+      "expected_parser_facts": {
+        "method": "getrawmempool",
+        "contains_txid": "4d4200fcaed9ad53c9747f510461e68158539d44f1d736dfc75db32f619fe0ce"
+      },
+      "refresh_policy": {
+        "reproduce": "Regenerate with --export-qbit-fixtures.",
+        "diff_policy": "Review qbitd mempool JSON shape changes before promotion."
+      },
+      "notes": "qbitd mempool txid snapshot captured before the promoted P2MR spend is mined."
+    },
+    {
+      "blockhash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+      "expected_parser_facts": {
+        "auxpow": true,
+        "auxpow_chain_id": 31430,
+        "auxpow_extended_header_bytes": 276,
+        "extended_header_hex": "00c1582f29ae16f2b77161efd491f0769ef4113664fcce5b83548f5df2927fd84990c67e3cf1d2058fbbc4e1ed0c70802488d663e202de763d82b705ff841232ac29876a58b53f71ffff7f200000000001000000010000000000000000000000000000000000000000000000000000000000000000ffffffff2d2cfabe6d6dca8ac8d3040f346567da565d28ca80f8a73fe2921d31f02f9f152a99d1947ffd010000000000000000000000010000000000000000015100000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000006d069e12cde61886b843af2d1a116f6a56b2843b115cc53ffae37a6febd912df58b53f71ffff7f2000000000",
+        "header_hex": "00c1582f29ae16f2b77161efd491f0769ef4113664fcce5b83548f5df2927fd84990c67e3cf1d2058fbbc4e1ed0c70802488d663e202de763d82b705ff841232ac29876a58b53f71ffff7f2000000000",
+        "pure_header_bytes": 80,
+        "qbit_weight": 457,
+        "serialized_size": 457,
+        "tx_count": 1,
+        "witness_scale_factor": 1
+      },
+      "fixture_type": "block",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_auxpow_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "height": 102,
+      "id": "regtest-qbitd-auxpow-block",
+      "network": "regtest",
+      "notes": "qbitd-generated AuxPoW block captured after submitauxblock.",
+      "path": "tests/fixtures/qbit/blocks/regtest-qbitd-auxpow-block.hex",
+      "refresh_policy": {
+        "diff_policy": "Commit only reviewed qbitd output and keep the qbit commit/source metadata.",
+        "reproduce": "Run this exporter with --randomseed=1 and review the manifest."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE and deterministic test-node P2MR mining address",
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit functional-test createauxblock/submitauxblock flow"
+      }
+    },
+    {
+      "blockhash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+      "expected_parser_facts": {
+        "auxpow": true,
+        "hash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+        "header_bytes": 80,
+        "header_contract": "pure qbit identity header"
+      },
+      "fixture_type": "metadata",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_auxpow_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "height": 102,
+      "id": "regtest-qbitd-auxpow-pure-header",
+      "network": "regtest",
+      "notes": "Pure qbit block identity header for the promoted AuxPoW block.",
+      "path": "tests/fixtures/qbit/headers/regtest-qbitd-auxpow-header.hex",
+      "refresh_policy": {
+        "diff_policy": "Review header contract changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_auxpow_fixtures.py."
+      },
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "first 80 bytes of promoted qbitd AuxPoW block"
+      }
+    },
+    {
+      "blockhash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+      "expected_parser_facts": {
+        "auxpow": true,
+        "hash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+        "header_bytes": 276,
+        "header_contract": "qbitd AuxPoW-extended serialized header",
+        "starts_with_pure_header": true
+      },
+      "fixture_type": "metadata",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_auxpow_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "height": 102,
+      "id": "regtest-qbitd-auxpow-extended-header",
+      "network": "regtest",
+      "notes": "qbitd returns this AuxPoW-extended header for getblockheader false.",
+      "path": "tests/fixtures/qbit/headers/regtest-qbitd-auxpow-extended-header.hex",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd serialized-header changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_auxpow_fixtures.py."
+      },
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit getblockheader false for the promoted AuxPoW block"
+      }
+    },
+    {
+      "blockhash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+      "expected_parser_facts": {
+        "auxpow_chain_id": 31430,
+        "payload_order": [
+          "coinbase_tx_no_witness",
+          "coinbase_merkle_branch",
+          "coinbase_branch_index",
+          "chain_merkle_branch",
+          "chain_index",
+          "parent_block_pure_header"
+        ],
+        "serialized_size": 196
+      },
+      "fixture_type": "metadata",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_auxpow_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "height": 102,
+      "id": "regtest-qbitd-auxpow-payload",
+      "network": "regtest",
+      "notes": "AuxPoW payload submitted to qbitd for the promoted block.",
+      "path": "tests/fixtures/qbit/auxpow/regtest-qbitd-auxpow-payload.hex",
+      "refresh_policy": {
+        "diff_policy": "Review qbit AuxPoW payload serialization changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_auxpow_fixtures.py."
+      },
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit functional-test make_valid_auxpow_from_template payload"
+      }
+    },
+    {
+      "blockhash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+      "expected_parser_facts": {
+        "auxpow": true,
+        "method": "getblock",
+        "tx_count": 1,
+        "verbosity": 1
+      },
+      "fixture_type": "rpc",
+      "generation_command": "Regenerate with export_qbit_auxpow_fixtures.py.",
+      "height": 102,
+      "id": "regtest-qbitd-getblock-auxpow",
+      "network": "regtest",
+      "notes": "qbitd getblock RPC sample for the AuxPoW block.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getblock-auxpow.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd RPC JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_auxpow_fixtures.py."
+      },
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit getblock RPC after submitauxblock"
+      }
+    },
+    {
+      "blockhash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+      "expected_parser_facts": {
+        "extended_header_fixture": "regtest-qbitd-auxpow-extended-header",
+        "hash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+        "method": "getblockheader",
+        "pure_header_fixture": "regtest-qbitd-auxpow-pure-header",
+        "verbose_json_has_no_serialized_header": true,
+        "verbosity": true
+      },
+      "fixture_type": "rpc",
+      "generation_command": "Regenerate with export_qbit_auxpow_fixtures.py.",
+      "height": 102,
+      "id": "regtest-qbitd-getblockheader-auxpow",
+      "network": "regtest",
+      "notes": "qbitd getblockheader RPC sample; raw header fixture is pure 80 bytes.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getblockheader-auxpow.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd RPC JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_auxpow_fixtures.py."
+      },
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit getblockheader RPC after submitauxblock"
+      }
+    },
+    {
+      "blockhash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+      "expected_parser_facts": {
+        "chainid": 31430,
+        "hash": "fd7f94d1992a159f2ff0311d92e23fa7f880ca285d56da6765340f04d3c88aca",
+        "method": "createauxblock"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "Regenerate with export_qbit_auxpow_fixtures.py.",
+      "height": 102,
+      "id": "regtest-qbitd-createauxblock-template",
+      "network": "regtest",
+      "notes": "qbitd createauxblock template used for the promoted AuxPoW block.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-createauxblock-template.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd AuxPoW RPC shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_auxpow_fixtures.py."
+      },
+      "source": {
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit createauxblock RPC before submitauxblock"
+      }
+    },
+    {
+      "expected_parser_facts": {
+        "bitcoin_wsf4_vsize": 4193,
+        "confirmed_height": 1006,
+        "control_block_bytes": 1,
+        "control_block_hex": "c1",
+        "fee_sats": 16489,
+        "initial_stack_item_count": 1,
+        "initial_stack_item_lengths": [
+          16384
+        ],
+        "initial_stack_total_bytes": 16384,
+        "input_count": 1,
+        "leaf_script_bytes": 2,
+        "leaf_script_hex": "7551",
+        "max_initial_stack_item_bytes": 16384,
+        "max_standard_stack_item_bytes": 16384,
+        "max_standard_total_initial_stack_bytes": 131072,
+        "max_standard_tx_weight": 400000,
+        "p2mr_witness": true,
+        "qbit_vsize": 16489,
+        "qbit_weight": 16489,
+        "serialized_size": 16489,
+        "spent_prevout_txid": "ec87f9421a7cb2daafa6853368ddb320d415dfdfc03e35d47190c10db2c07867",
+        "spent_prevout_vout": 1,
+        "witness_scale_factor": 1
+      },
+      "fixture_type": "transaction",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-p2mr-stack-16k-spend-tx",
+      "network": "regtest",
+      "notes": "Accepted qbitd-generated P2MR spend at the 16 KiB stack-item boundary.",
+      "path": "tests/fixtures/qbit/transactions/regtest-qbitd-p2mr-stack-16k-spend.hex",
+      "refresh_policy": {
+        "diff_policy": "Commit only reviewed qbitd output and keep the qbit commit/source metadata.",
+        "reproduce": "Run this exporter with --randomseed=1 and review the manifest."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "5b33c53a7cca912f09376562f9eae62a3d16513e6274558b3f43193bf5febc1f"
+    },
+    {
+      "expected_parser_facts": {
+        "bitcoin_wsf4_vsize": 32872,
+        "confirmed_height": 1006,
+        "control_block_bytes": 1,
+        "control_block_hex": "c1",
+        "fee_sats": 131205,
+        "initial_stack_item_count": 8,
+        "initial_stack_item_lengths": [
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384
+        ],
+        "initial_stack_total_bytes": 131072,
+        "input_count": 1,
+        "leaf_script_bytes": 9,
+        "leaf_script_hex": "757575757575757551",
+        "max_initial_stack_item_bytes": 16384,
+        "max_standard_stack_item_bytes": 16384,
+        "max_standard_total_initial_stack_bytes": 131072,
+        "max_standard_tx_weight": 400000,
+        "p2mr_witness": true,
+        "qbit_vsize": 131205,
+        "qbit_weight": 131205,
+        "serialized_size": 131205,
+        "spent_prevout_txid": "8527eeee21648d70fa9ed88d048575a71b52b4c734ca07216bdf91e7b0ddbe11",
+        "spent_prevout_vout": 1,
+        "witness_scale_factor": 1
+      },
+      "fixture_type": "transaction",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-p2mr-stack-128k-spend-tx",
+      "network": "regtest",
+      "notes": "Accepted qbitd-generated P2MR spend at the 128 KiB total initial-stack boundary.",
+      "path": "tests/fixtures/qbit/transactions/regtest-qbitd-p2mr-stack-128k-spend.hex",
+      "refresh_policy": {
+        "diff_policy": "Commit only reviewed qbitd output and keep the qbit commit/source metadata.",
+        "reproduce": "Run this exporter with --randomseed=1 and review the manifest."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "5417ced2dcec22bc48196baed719df54311851a6f8d48c4d44f9c42b97fa985e"
+    },
+    {
+      "expected_parser_facts": {
+        "bitcoin_wsf4_vsize": 4194,
+        "control_block_bytes": 1,
+        "control_block_hex": "c1",
+        "expected_reject_reason": "bad-witness-nonstandard",
+        "fee_sats": 16492,
+        "initial_stack_item_count": 1,
+        "initial_stack_item_lengths": [
+          16385
+        ],
+        "initial_stack_total_bytes": 16385,
+        "input_count": 1,
+        "leaf_script_bytes": 4,
+        "leaf_script_hex": "76757551",
+        "max_initial_stack_item_bytes": 16385,
+        "max_standard_stack_item_bytes": 16384,
+        "max_standard_total_initial_stack_bytes": 131072,
+        "max_standard_tx_weight": 400000,
+        "p2mr_witness": true,
+        "qbit_vsize": 16492,
+        "qbit_weight": 16492,
+        "serialized_size": 16492,
+        "spent_prevout_txid": "5f8c7167a4c5dfb94b35d019b9500c1432bf1a1f9a6c72049246bda58d20948b",
+        "spent_prevout_vout": 1,
+        "witness_scale_factor": 1
+      },
+      "fixture_type": "transaction",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-p2mr-stack-item-oversize-reject-tx",
+      "network": "regtest",
+      "notes": "Rejected qbitd-generated P2MR spend with one stack item one byte above the 16 KiB standard-policy boundary.",
+      "path": "tests/fixtures/qbit/transactions/regtest-qbitd-p2mr-stack-item-oversize-reject.hex",
+      "refresh_policy": {
+        "diff_policy": "Commit only reviewed qbitd output and keep the qbit commit/source metadata.",
+        "reproduce": "Run this exporter with --randomseed=1 and review the manifest."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "ecb75dc508393c429252f50e10b2e8c3f5390d372a307ba4166a27abeaf079cf"
+    },
+    {
+      "expected_parser_facts": {
+        "bitcoin_wsf4_vsize": 32873,
+        "control_block_bytes": 1,
+        "control_block_hex": "c1",
+        "expected_reject_reason": "bad-witness-nonstandard",
+        "fee_sats": 131208,
+        "initial_stack_item_count": 9,
+        "initial_stack_item_lengths": [
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          16384,
+          1
+        ],
+        "initial_stack_total_bytes": 131073,
+        "input_count": 1,
+        "leaf_script_bytes": 10,
+        "leaf_script_hex": "75757575757575757551",
+        "max_initial_stack_item_bytes": 16384,
+        "max_standard_stack_item_bytes": 16384,
+        "max_standard_total_initial_stack_bytes": 131072,
+        "max_standard_tx_weight": 400000,
+        "p2mr_witness": true,
+        "qbit_vsize": 131208,
+        "qbit_weight": 131208,
+        "serialized_size": 131208,
+        "spent_prevout_txid": "716cbe28a0174035719bc66899a091be90e2d9520360bd8b30861a49622de026",
+        "spent_prevout_vout": 1,
+        "witness_scale_factor": 1
+      },
+      "fixture_type": "transaction",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-p2mr-stack-total-oversize-reject-tx",
+      "network": "regtest",
+      "notes": "Rejected qbitd-generated P2MR spend with initial stack bytes one byte above the 128 KiB standard-policy boundary.",
+      "path": "tests/fixtures/qbit/transactions/regtest-qbitd-p2mr-stack-total-oversize-reject.hex",
+      "refresh_policy": {
+        "diff_policy": "Commit only reviewed qbitd output and keep the qbit commit/source metadata.",
+        "reproduce": "Run this exporter with --randomseed=1 and review the manifest."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "a6d77d4a4562ab6f787d8939e6023e0066fab95b7b4d84db8e9fa755f73cdee9"
+    },
+    {
+      "blockhash": "7aff7d8cc2736b51610eafa325d1c3061efe7ba5a40c6bc07477b97470648a3b",
+      "expected_parser_facts": {
+        "auxpow": false,
+        "contains_txids": [
+          "5b33c53a7cca912f09376562f9eae62a3d16513e6274558b3f43193bf5febc1f",
+          "5417ced2dcec22bc48196baed719df54311851a6f8d48c4d44f9c42b97fa985e"
+        ],
+        "pure_header_bytes": 80,
+        "qbit_weight": 147956,
+        "serialized_size": 147956,
+        "tx_count": 3,
+        "witness_scale_factor": 1
+      },
+      "fixture_type": "block",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "height": 1006,
+      "id": "regtest-qbitd-p2mr-boundary-spends-block",
+      "network": "regtest",
+      "notes": "qbitd block that confirms both accepted P2MR boundary spends.",
+      "path": "tests/fixtures/qbit/blocks/regtest-qbitd-p2mr-boundary-spends-block.hex",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd block and tx ordering changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      }
+    },
+    {
+      "expected_parser_facts": {
+        "allowed": true,
+        "fee_sats": 16489,
+        "method": "testmempoolaccept",
+        "txid": "5b33c53a7cca912f09376562f9eae62a3d16513e6274558b3f43193bf5febc1f",
+        "vsize_policy": "qbit WSF=1 witness-inclusive serialized size; no sigop adjustment for this OP_DROP boundary fixture"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-testmempoolaccept-p2mr-stack-16k",
+      "network": "regtest",
+      "notes": "qbitd testmempoolaccept RPC truth for stack-16k.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-testmempoolaccept-p2mr-stack-16k.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool-accept JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "5b33c53a7cca912f09376562f9eae62a3d16513e6274558b3f43193bf5febc1f"
+    },
+    {
+      "expected_parser_facts": {
+        "allowed": true,
+        "fee_sats": 131205,
+        "method": "testmempoolaccept",
+        "txid": "5417ced2dcec22bc48196baed719df54311851a6f8d48c4d44f9c42b97fa985e",
+        "vsize_policy": "qbit WSF=1 witness-inclusive serialized size; no sigop adjustment for this OP_DROP boundary fixture"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-testmempoolaccept-p2mr-stack-128k",
+      "network": "regtest",
+      "notes": "qbitd testmempoolaccept RPC truth for stack-128k.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-testmempoolaccept-p2mr-stack-128k.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool-accept JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "5417ced2dcec22bc48196baed719df54311851a6f8d48c4d44f9c42b97fa985e"
+    },
+    {
+      "expected_parser_facts": {
+        "allowed": false,
+        "method": "testmempoolaccept",
+        "reject_reason": "bad-witness-nonstandard",
+        "txid": "ecb75dc508393c429252f50e10b2e8c3f5390d372a307ba4166a27abeaf079cf"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-testmempoolaccept-p2mr-stack-item-oversize",
+      "network": "regtest",
+      "notes": "qbitd testmempoolaccept RPC truth for stack-item-oversize.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-testmempoolaccept-p2mr-stack-item-oversize.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool-accept JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "ecb75dc508393c429252f50e10b2e8c3f5390d372a307ba4166a27abeaf079cf"
+    },
+    {
+      "expected_parser_facts": {
+        "allowed": false,
+        "method": "testmempoolaccept",
+        "reject_reason": "bad-witness-nonstandard",
+        "txid": "a6d77d4a4562ab6f787d8939e6023e0066fab95b7b4d84db8e9fa755f73cdee9"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-testmempoolaccept-p2mr-stack-total-oversize",
+      "network": "regtest",
+      "notes": "qbitd testmempoolaccept RPC truth for stack-total-oversize.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-testmempoolaccept-p2mr-stack-total-oversize.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool-accept JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "a6d77d4a4562ab6f787d8939e6023e0066fab95b7b4d84db8e9fa755f73cdee9"
+    },
+    {
+      "expected_parser_facts": {
+        "fee_sats": 16489,
+        "method": "getmempoolentry",
+        "txid": "5b33c53a7cca912f09376562f9eae62a3d16513e6274558b3f43193bf5febc1f",
+        "vsize_policy": "qbit WSF=1 witness-inclusive serialized size; no sigop adjustment for this OP_DROP boundary fixture"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-getmempoolentry-p2mr-stack-16k",
+      "network": "regtest",
+      "notes": "qbitd mempool entry captured before stack-16k is mined.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getmempoolentry-p2mr-stack-16k.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "5b33c53a7cca912f09376562f9eae62a3d16513e6274558b3f43193bf5febc1f"
+    },
+    {
+      "expected_parser_facts": {
+        "fee_sats": 131205,
+        "method": "getmempoolentry",
+        "txid": "5417ced2dcec22bc48196baed719df54311851a6f8d48c4d44f9c42b97fa985e",
+        "vsize_policy": "qbit WSF=1 witness-inclusive serialized size; no sigop adjustment for this OP_DROP boundary fixture"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-getmempoolentry-p2mr-stack-128k",
+      "network": "regtest",
+      "notes": "qbitd mempool entry captured before stack-128k is mined.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getmempoolentry-p2mr-stack-128k.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      },
+      "txid": "5417ced2dcec22bc48196baed719df54311851a6f8d48c4d44f9c42b97fa985e"
+    },
+    {
+      "expected_parser_facts": {
+        "contains_txids": [
+          "5b33c53a7cca912f09376562f9eae62a3d16513e6274558b3f43193bf5febc1f",
+          "5417ced2dcec22bc48196baed719df54311851a6f8d48c4d44f9c42b97fa985e"
+        ],
+        "method": "getrawmempool"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-getrawmempool-with-p2mr-boundary-spends",
+      "network": "regtest",
+      "notes": "qbitd mempool txid snapshot for both accepted P2MR boundary spends.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getrawmempool-with-p2mr-boundary-spends.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      }
+    },
+    {
+      "blockhash": "7aff7d8cc2736b51610eafa325d1c3061efe7ba5a40c6bc07477b97470648a3b",
+      "expected_parser_facts": {
+        "contains_txids": [
+          "5b33c53a7cca912f09376562f9eae62a3d16513e6274558b3f43193bf5febc1f",
+          "5417ced2dcec22bc48196baed719df54311851a6f8d48c4d44f9c42b97fa985e"
+        ],
+        "method": "getblock",
+        "tx_count": 3,
+        "verbosity": 1
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "height": 1006,
+      "id": "regtest-qbitd-getblock-p2mr-boundary-spends",
+      "network": "regtest",
+      "notes": "qbitd block RPC sample for the P2MR boundary-spend block.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getblock-p2mr-boundary-spends.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd block JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      }
+    },
+    {
+      "blockhash": "7aff7d8cc2736b51610eafa325d1c3061efe7ba5a40c6bc07477b97470648a3b",
+      "expected_parser_facts": {
+        "hash": "7aff7d8cc2736b51610eafa325d1c3061efe7ba5a40c6bc07477b97470648a3b",
+        "header_bytes": 80,
+        "method": "getblockheader",
+        "verbosity": true
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_p2mr_boundary_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "height": 1006,
+      "id": "regtest-qbitd-getblockheader-p2mr-boundary-spends",
+      "network": "regtest",
+      "notes": "qbitd header RPC sample for the P2MR boundary-spend block.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getblockheader-p2mr-boundary-spends.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd header JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_p2mr_boundary_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet ADDRESS_P2MR_OP_TRUE, deterministic OP_DROP/OP_TRUE P2MR leaves, and fixed 0x42 stack bytes",
+        "kind": "qbitd-generated",
+        "qbit_commit": "cdd063fa266401c896b50f566060ce02e15804f7",
+        "source_ref": "qbit functional-test feature_p2mr.py boundary policy flows"
+      }
+    },
+    {
+      "expected_parser_facts": {
+        "bytes_per_sigop": 20,
+        "fee_sats": 4440,
+        "mempool_vsize": 4440,
+        "mempool_vsize_exceeds_serialized_size": true,
+        "p2mr_witness": false,
+        "qbit_tx_vsize": 115,
+        "qbit_weight": 115,
+        "script_type": "p2wsh",
+        "serialized_size": 115,
+        "sigop_adjusted_vsize": 4440,
+        "sigop_cost": 222,
+        "spent_prevout_txid": "654eda416870723bac940b984939c4e095fd74a940309e291c6239a08b31e6e1",
+        "spent_prevout_vout": 1,
+        "witness_scale_factor": 1,
+        "witness_script_hex": "0063aeaeaeaeaeaeaeaeaeaeaeacac6851"
+      },
+      "fixture_type": "transaction",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_sigop_vsize_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-p2wsh-sigop-adjusted-vsize-spend-tx",
+      "network": "regtest",
+      "notes": "qbitd-generated P2WSH spend whose mempool vsize is inflated by bytes-per-sigop policy above its serialized byte size.",
+      "path": "tests/fixtures/qbit/transactions/regtest-qbitd-p2wsh-sigop-adjusted-vsize-spend.hex",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd tx bytes and sigop-vsize policy changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_sigop_vsize_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet deterministic P2WSH funding, fixed sigop script, and fixed mocktime",
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit functional-test mempool_sigoplimit.py accepted bytespersigop flow"
+      },
+      "txid": "19f4edcdaebcc136f7bac6a4d58c3223a5ba3cf208f473cf92eadc6afd6bec3a"
+    },
+    {
+      "expected_parser_facts": {
+        "allowed": true,
+        "method": "testmempoolaccept",
+        "serialized_size": 115,
+        "sigop_adjusted_vsize": 4440,
+        "txid": "19f4edcdaebcc136f7bac6a4d58c3223a5ba3cf208f473cf92eadc6afd6bec3a",
+        "vsize_policy": "qbit bytespersigop-adjusted mempool vsize"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_sigop_vsize_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-testmempoolaccept-p2wsh-sigop-adjusted-vsize",
+      "network": "regtest",
+      "notes": "qbitd testmempoolaccept RPC truth for sigop-adjusted mempool vsize.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-testmempoolaccept-p2wsh-sigop-adjusted-vsize.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool-accept JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_sigop_vsize_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet deterministic P2WSH funding, fixed sigop script, and fixed mocktime",
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit functional-test mempool_sigoplimit.py accepted bytespersigop flow"
+      },
+      "txid": "19f4edcdaebcc136f7bac6a4d58c3223a5ba3cf208f473cf92eadc6afd6bec3a"
+    },
+    {
+      "expected_parser_facts": {
+        "fee_sats": 4440,
+        "method": "getmempoolentry",
+        "serialized_size": 115,
+        "sigop_adjusted_vsize": 4440,
+        "txid": "19f4edcdaebcc136f7bac6a4d58c3223a5ba3cf208f473cf92eadc6afd6bec3a",
+        "vsize_policy": "qbit bytespersigop-adjusted mempool vsize"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_sigop_vsize_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-getmempoolentry-p2wsh-sigop-adjusted-vsize",
+      "network": "regtest",
+      "notes": "qbitd mempool entry captured before the sigop-adjusted spend is mined.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getmempoolentry-p2wsh-sigop-adjusted-vsize.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_sigop_vsize_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet deterministic P2WSH funding, fixed sigop script, and fixed mocktime",
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit functional-test mempool_sigoplimit.py accepted bytespersigop flow"
+      },
+      "txid": "19f4edcdaebcc136f7bac6a4d58c3223a5ba3cf208f473cf92eadc6afd6bec3a"
+    },
+    {
+      "expected_parser_facts": {
+        "method": "getrawtransaction",
+        "serialized_size": 115,
+        "txid": "19f4edcdaebcc136f7bac6a4d58c3223a5ba3cf208f473cf92eadc6afd6bec3a",
+        "verbosity": true,
+        "vsize_policy": "qbit tx JSON serialized size under WSF=1"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_sigop_vsize_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-getrawtransaction-p2wsh-sigop-adjusted-vsize",
+      "network": "regtest",
+      "notes": "qbitd verbose transaction RPC for the sigop-adjusted mempool-vsize sample.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getrawtransaction-p2wsh-sigop-adjusted-vsize.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd raw transaction JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_sigop_vsize_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet deterministic P2WSH funding, fixed sigop script, and fixed mocktime",
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit functional-test mempool_sigoplimit.py accepted bytespersigop flow"
+      },
+      "txid": "19f4edcdaebcc136f7bac6a4d58c3223a5ba3cf208f473cf92eadc6afd6bec3a"
+    },
+    {
+      "expected_parser_facts": {
+        "contains_txid": "19f4edcdaebcc136f7bac6a4d58c3223a5ba3cf208f473cf92eadc6afd6bec3a",
+        "method": "getrawmempool"
+      },
+      "fixture_type": "rpc",
+      "generation_command": "python3 tests/fixtures/qbit/scripts/export_qbit_sigop_vsize_fixtures.py --qbit-source .context/qbit-source --output-dir <output-dir> --randomseed=1",
+      "id": "regtest-qbitd-getrawmempool-with-sigop-adjusted-vsize",
+      "network": "regtest",
+      "notes": "qbitd mempool txid snapshot for the sigop-adjusted-vsize sample.",
+      "path": "tests/fixtures/qbit/rpc/regtest-qbitd-getrawmempool-with-sigop-adjusted-vsize.json",
+      "refresh_policy": {
+        "diff_policy": "Review qbitd mempool JSON shape changes before promotion.",
+        "reproduce": "Regenerate with export_qbit_sigop_vsize_fixtures.py."
+      },
+      "source": {
+        "deterministic_key_material": "qbit MiniWallet deterministic P2WSH funding, fixed sigop script, and fixed mocktime",
+        "kind": "qbitd-generated",
+        "qbit_commit": "57bb53575f0d4931e77ac4a34b7e7f4c049f0636",
+        "source_ref": "qbit functional-test mempool_sigoplimit.py accepted bytespersigop flow"
+      },
+      "txid": "19f4edcdaebcc136f7bac6a4d58c3223a5ba3cf208f473cf92eadc6afd6bec3a"
+    }
+  ]
+}
