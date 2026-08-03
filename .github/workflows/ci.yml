@@ -39,6 +39,7 @@ jobs:
         uses: './.github/actions/ci-rust-setup'
         with:
           cache-name: test
+      - run: cargo test --lib
       - run: cargo test --lib --all-features
 
   qbit-regtest-harness:

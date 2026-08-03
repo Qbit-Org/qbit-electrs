@@ -287,7 +287,7 @@ pub fn bitcoin_genesis_hash(network: Network) -> bitcoin::BlockHash {
         static ref SIGNET_GENESIS: bitcoin::BlockHash =
             genesis_block(BNetwork::Signet).block_hash();
         static ref QBIT_MAINNET_GENESIS: bitcoin::BlockHash = bitcoin::BlockHash::from_str(
-            "0000324188278d089b5eabd9b62bf874c7512677cea90720af51ea5a61a2f997"
+            "0000000000004d60aa5d46013991d0a0e2995d89ee98e53068ae196d763e79f2"
         )
         .unwrap();
         static ref QBIT_TESTNET4_GENESIS: bitcoin::BlockHash = bitcoin::BlockHash::from_str(
@@ -405,7 +405,7 @@ mod tests {
 
         assert_eq!(
             genesis_hash(Network::Qbit).to_string(),
-            "0000324188278d089b5eabd9b62bf874c7512677cea90720af51ea5a61a2f997"
+            "0000000000004d60aa5d46013991d0a0e2995d89ee98e53068ae196d763e79f2"
         );
         assert_eq!(
             genesis_hash(Network::QbitTestnet4).to_string(),
