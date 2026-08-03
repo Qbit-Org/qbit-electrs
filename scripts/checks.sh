@@ -57,6 +57,10 @@ TESTNAME="Running cargo clippy check electrum-discovery + liquid"
 echo "$TESTNAME"
 cargo clippy $@ -q -F electrum-discovery,liquid
 
+TESTNAME="Running cargo test with default features"
+echo "$TESTNAME"
+cargo test $@ -q --lib
+
 TESTNAME="Running cargo test with all features"
 echo "$TESTNAME"
 cargo test $@ -q --lib --all-features

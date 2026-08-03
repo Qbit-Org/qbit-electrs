@@ -9,6 +9,8 @@ Source:
 - qbit source: `Qbit-Org/qbit` public release snapshot
 - qbit source ref: `pinned snapshot` at `57bb53575f0d4931e77ac4a34b7e7f4c049f0636`
 - qbit release tag: `v0.1.0-testnet4`
+- qbit mainnet launch source ref: `v1.0.0` at
+  `7ebcddb622d6e639041f005a189b048ec2a221fe`
 - Fixture manifests and harness outputs preserve source provenance for
   reproducibility.
 
@@ -59,7 +61,7 @@ contract update, fixture refresh, and execution-plan update.
 
 | Network | Magic bytes | Rust little-endian `u32` magic | P2P port | RPC port | Bech32 HRP | Genesis hash |
 | --- | --- | --- | ---: | ---: | --- | --- |
-| mainnet | `44 4f 24 a8` | `0xA8244F44` | 8355 | 8352 | `qb` | `0000324188278d089b5eabd9b62bf874c7512677cea90720af51ea5a61a2f997` |
+| mainnet | `44 4f 24 a8` | `0xA8244F44` | 8355 | 8352 | `qb` | `0000000000004d60aa5d46013991d0a0e2995d89ee98e53068ae196d763e79f2` |
 | testnet4 | `c7 c4 16 40` | `0x4016C4C7` | 48355 | 48352 | `tq` | `000000000000796fe86bbc0bf1b66a07e4b4c0676f74b54cf7e5ce8b3f1a0090` |
 | regtest | `a6 6b 1f da` | `0xDA1F6BA6` | 18460 | 18452 | `qbrt` | `0ee96aa77c4b600850e349344fa21b107e805f5370ddc7a6189db12cf69acce6` |
 
@@ -67,9 +69,16 @@ qbit source references at the source snapshot:
 
 - Network magic, ports, HRPs, and genesis hashes: `src/kernel/chainparams.cpp`
   and `src/chainparamsbase.cpp`
-- The mainnet genesis in this qbit ref is still marked in source as a
-  development/pre-launch placeholder; do not infer launch readiness from this
-  table.
+- The mainnet row uses the final launch genesis from the mainnet launch source
+  ref above, superseding the development/pre-launch placeholder in the public
+  testnet snapshot.
+- Electrs persists the selected network name and genesis with its derived
+  index. When opening a legacy index without that marker, it verifies every
+  stored root header before adopting the index. A mismatched or mixed-genesis
+  index is not processed as a reorganization: Electrs clears only its derived
+  `txstore`, `history`, and `cache` databases and rebuilds them from the
+  selected daemon. The rebuild intent is persisted alongside those databases
+  before cleanup begins so an interrupted cleanup resumes on the next start.
 - The testnet4 row is the public testnet4 reset at this qbit ref: genesis time
   `1781704709`, nonce `2528738861`, bits `0x1a7f1ab5`, merkle root
   `66bf018c3377135cdc87f66ed4926b6a3be5aeef890841a3cfebaff9dfb91ed0`.
@@ -195,10 +204,9 @@ chain index
 parent block pure header
 ```
 
-The AuxPoW version flag is `0x00000100`. qbit uses chain ID `31430` for the
-mainnet placeholder, test chains, testnet4, and regtest at this source ref. The
-parent block in the AuxPoW payload is a pure header, which avoids recursive
-AuxPoW parsing.
+The AuxPoW version flag is `0x00000100`. Final mainnet uses chain ID `47`; the
+public testnet4 and regtest fixtures use chain ID `31430`. The parent block in
+the AuxPoW payload is a pure header, which avoids recursive AuxPoW parsing.
 
 ## REST And Electrum Header APIs
 

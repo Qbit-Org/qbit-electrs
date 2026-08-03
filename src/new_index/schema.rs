@@ -16,11 +16,13 @@ use elements::{
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryInto;
+use std::fs;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use crate::chain::{
-    BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxOut, Txid, Value,
+    genesis_hash, BlockHash, BlockHeader, Network, OutPoint, Script, Transaction, TxOut, Txid,
+    Value,
 };
 use crate::config::Config;
 use crate::daemon::Daemon;
@@ -40,6 +42,10 @@ use crate::elements::{asset, peg};
 use super::{db::ReverseScanGroupIterator, fetch::bitcoind_sequential_fetcher};
 
 const MIN_HISTORY_ITEMS_TO_CACHE: usize = 100;
+// Bind all three Qbit derived databases to one canonical network and static genesis.
+const CHAIN_IDENTITY_KEY: &[u8] = b"\0electrs:chain-identity";
+const REINDEX_REQUIRED_FILE: &str = ".electrs-reindex-required";
+const STORE_DATABASES: [&str; 3] = ["txstore", "history", "cache"];
 
 fn should_fetch_raw_block_from_daemon(light_mode: bool, network: Network) -> bool {
     light_mode || network.is_qbit()
@@ -57,19 +63,77 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path, config: &Config) -> Self {
-        let txstore_db = DB::open(&path.join("txstore"), config);
+        Self::open_for_network(path, config.network_type, config.light_mode)
+    }
+
+    fn open_for_network(path: &Path, network: Network, light_mode: bool) -> Self {
+        if network.is_qbit() && network.has_static_genesis_hash() && reindex_required(path) {
+            warn!(
+                "resuming interrupted derived-index cleanup under {:?}",
+                path
+            );
+            return Self::rebuild(path, network, light_mode);
+        }
+
+        match Self::open_checked(path, network, light_mode) {
+            Ok(store) => store,
+            Err(reason) => {
+                warn!(
+                    "{}; clearing derived index databases under {:?} and reindexing",
+                    reason, path
+                );
+                mark_reindex_required(path);
+                Self::rebuild(path, network, light_mode)
+            }
+        }
+    }
+
+    fn rebuild(path: &Path, network: Network, light_mode: bool) -> Self {
+        clear_store_databases(path);
+        let store = Self::open_checked(path, network, light_mode).unwrap_or_else(|reason| {
+            panic!(
+                "failed to initialize a clean {} index at {:?}: {}",
+                network.canonical_name(),
+                path,
+                reason
+            )
+        });
+        clear_reindex_required(path);
+        store
+    }
+
+    fn open_checked(
+        path: &Path,
+        network: Network,
+        light_mode: bool,
+    ) -> std::result::Result<Self, String> {
+        let txstore_db = DB::open(&path.join("txstore"), light_mode);
+        let history_db = DB::open(&path.join("history"), light_mode);
+        let cache_db = DB::open(&path.join("cache"), light_mode);
+        let tip_hash = txstore_db.get(b"t");
+        let verify_qbit_identity = network.is_qbit() && network.has_static_genesis_hash();
+        let headers_map = if verify_qbit_identity || tip_hash.is_some() {
+            load_blockheaders(&txstore_db)
+        } else {
+            HashMap::new()
+        };
+
+        if verify_qbit_identity {
+            verify_store_chain_identity(
+                [&txstore_db, &history_db, &cache_db],
+                &headers_map,
+                network,
+            )?;
+        }
+
         let added_blockhashes = load_blockhashes(&txstore_db, &BlockRow::done_filter());
         debug!("{} blocks were added", added_blockhashes.len());
 
-        let history_db = DB::open(&path.join("history"), config);
         let indexed_blockhashes = load_blockhashes(&history_db, &BlockRow::done_filter());
         debug!("{} blocks were indexed", indexed_blockhashes.len());
 
-        let cache_db = DB::open(&path.join("cache"), config);
-
-        let headers = if let Some(tip_hash) = txstore_db.get(b"t") {
+        let headers = if let Some(tip_hash) = tip_hash {
             let tip_hash = deserialize(&tip_hash).expect("invalid chain tip in `t`");
-            let headers_map = load_blockheaders(&txstore_db);
             debug!(
                 "{} headers were loaded, tip at {:?}",
                 headers_map.len(),
@@ -80,14 +144,14 @@ impl Store {
             HeaderList::empty()
         };
 
-        Store {
+        Ok(Store {
             txstore_db,
             history_db,
             cache_db,
             added_blockhashes: RwLock::new(added_blockhashes),
             indexed_blockhashes: RwLock::new(indexed_blockhashes),
             indexed_headers: RwLock::new(headers),
-        }
+        })
     }
 
     pub fn txstore_db(&self) -> &DB {
@@ -104,6 +168,146 @@ impl Store {
 
     pub fn done_initial_sync(&self) -> bool {
         self.txstore_db.get(b"t").is_some()
+    }
+}
+
+fn chain_identity(network: Network) -> Bytes {
+    let mut identity = network.canonical_name().as_bytes().to_vec();
+    identity.push(0);
+    identity.extend_from_slice(&genesis_hash(network)[..]);
+    identity
+}
+
+fn verify_store_chain_identity(
+    databases: [&DB; 3],
+    headers_map: &HashMap<BlockHash, BlockHeader>,
+    network: Network,
+) -> std::result::Result<(), String> {
+    let expected_genesis = genesis_hash(network);
+    let expected_identity = chain_identity(network);
+
+    for (name, database) in STORE_DATABASES.iter().zip(databases) {
+        if let Some(stored_identity) = database.get(CHAIN_IDENTITY_KEY) {
+            if stored_identity != expected_identity {
+                return Err(format!(
+                    "{} index database is bound to a different chain than {} genesis {}",
+                    name,
+                    network.canonical_name(),
+                    expected_genesis
+                ));
+            }
+        }
+    }
+
+    let stored_roots = headers_map
+        .values()
+        .filter(|header| header.prev_blockhash == BlockHash::default())
+        .map(BlockHeader::block_hash)
+        .collect::<HashSet<_>>();
+    if !headers_map.is_empty()
+        && (stored_roots.len() != 1 || !stored_roots.contains(&expected_genesis))
+    {
+        let mut roots = stored_roots
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        roots.sort();
+        return Err(format!(
+            "{} index database expects genesis {}, but its stored root header(s) are [{}]",
+            network.canonical_name(),
+            expected_genesis,
+            roots.join(", ")
+        ));
+    }
+
+    for database in databases {
+        if database.get(CHAIN_IDENTITY_KEY).is_none() {
+            database.put_sync(CHAIN_IDENTITY_KEY, &expected_identity);
+        }
+    }
+    Ok(())
+}
+
+fn reindex_required(path: &Path) -> bool {
+    match fs::metadata(path.join(REINDEX_REQUIRED_FILE)) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!(
+            "failed to inspect the derived-index rebuild marker under {:?}: {}",
+            path, error
+        ),
+    }
+}
+
+fn mark_reindex_required(path: &Path) {
+    fs::create_dir_all(path).unwrap_or_else(|error| {
+        panic!(
+            "failed to create derived-index directory {:?}: {}",
+            path, error
+        )
+    });
+    let marker_path = path.join(REINDEX_REQUIRED_FILE);
+    let marker = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&marker_path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to create derived-index rebuild marker {:?}: {}",
+                marker_path, error
+            )
+        });
+    marker.sync_all().unwrap_or_else(|error| {
+        panic!(
+            "failed to persist derived-index rebuild marker {:?}: {}",
+            marker_path, error
+        )
+    });
+    sync_store_directory(path);
+}
+
+fn clear_reindex_required(path: &Path) {
+    let marker_path = path.join(REINDEX_REQUIRED_FILE);
+    fs::remove_file(&marker_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to clear derived-index rebuild marker {:?}: {}",
+            marker_path, error
+        )
+    });
+    sync_store_directory(path);
+}
+
+#[cfg(unix)]
+fn sync_store_directory(path: &Path) {
+    let directory = fs::File::open(path).unwrap_or_else(|error| {
+        panic!(
+            "failed to open derived-index directory {:?} for syncing: {}",
+            path, error
+        )
+    });
+    directory.sync_all().unwrap_or_else(|error| {
+        panic!(
+            "failed to persist derived-index directory {:?}: {}",
+            path, error
+        )
+    });
+}
+
+#[cfg(not(unix))]
+fn sync_store_directory(_path: &Path) {}
+
+fn clear_store_databases(path: &Path) {
+    for name in STORE_DATABASES {
+        let database_path = path.join(name);
+        match fs::remove_dir_all(&database_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!(
+                "failed to clear incompatible index database {:?}: {}",
+                database_path, error
+            ),
+        }
     }
 }
 
@@ -2351,6 +2555,204 @@ mod tests {
 #[cfg(all(test, not(feature = "liquid")))]
 mod qbit_tests {
     use super::*;
+    use std::str::FromStr;
+    use tempfile::tempdir;
+
+    fn qbit_mainnet_header(merkle_root: &str, time: u32, bits: u32, nonce: u32) -> BlockHeader {
+        BlockHeader {
+            version: 1,
+            prev_blockhash: BlockHash::default(),
+            merkle_root: bitcoin::TxMerkleNode::from_str(merkle_root).unwrap(),
+            time,
+            bits,
+            nonce,
+        }
+    }
+
+    fn final_qbit_mainnet_header() -> BlockHeader {
+        let header = qbit_mainnet_header(
+            "584b62d357e3213ae27815d53b41efc869cc91fcf73d6a81dcab5e08508cb6f1",
+            1_784_131_083,
+            0x1a7f1ab5,
+            1_084_616_938,
+        );
+        assert_eq!(header.block_hash(), genesis_hash(Network::Qbit));
+        header
+    }
+
+    fn placeholder_qbit_mainnet_header() -> BlockHeader {
+        let header = qbit_mainnet_header(
+            "773941c57f540b7e0f841db6de90bf4f29d305d8233224c2581025c684387313",
+            1_738_713_600,
+            0x1f00ffff,
+            45_609,
+        );
+        assert_eq!(
+            header.block_hash().to_string(),
+            "0000324188278d089b5eabd9b62bf874c7512677cea90720af51ea5a61a2f997"
+        );
+        header
+    }
+
+    fn write_header(db: &DB, header: &BlockHeader) {
+        let hash = header.block_hash();
+        db.write(
+            vec![BlockRow {
+                key: BlockKey {
+                    code: b'B',
+                    hash: full_hash(&hash[..]),
+                },
+                value: serialize(header),
+            }
+            .into_row()],
+            DBFlush::Enable,
+        );
+    }
+
+    fn assert_qbit_identity(store: &Store) {
+        let expected = chain_identity(Network::Qbit);
+        assert_eq!(
+            store.txstore_db.get(CHAIN_IDENTITY_KEY),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            store.history_db.get(CHAIN_IDENTITY_KEY),
+            Some(expected.clone())
+        );
+        assert_eq!(store.cache_db.get(CHAIN_IDENTITY_KEY), Some(expected));
+    }
+
+    #[test]
+    fn empty_qbit_store_is_bound_to_final_mainnet_genesis() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("newindex");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let store = Store::open_for_network(&path, Network::Qbit, false);
+
+        assert!(store.indexed_headers.read().unwrap().is_empty());
+        assert_qbit_identity(&store);
+    }
+
+    #[test]
+    fn matching_legacy_qbit_store_is_preserved_and_bound() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("newindex");
+        std::fs::create_dir_all(&path).unwrap();
+        let header = final_qbit_mainnet_header();
+        let hash = header.block_hash();
+        {
+            let txstore = DB::open(&path.join("txstore"), false);
+            write_header(&txstore, &header);
+            txstore.put_sync(b"t", &serialize(&hash));
+            txstore.put_sync(b"sentinel", b"keep");
+            let history = DB::open(&path.join("history"), false);
+            history.put_sync(b"sentinel", b"keep");
+            let cache = DB::open(&path.join("cache"), false);
+            cache.put_sync(b"sentinel", b"keep");
+        }
+
+        let store = Store::open_for_network(&path, Network::Qbit, false);
+
+        assert_eq!(store.txstore_db.get(b"sentinel"), Some(b"keep".to_vec()));
+        assert_eq!(store.history_db.get(b"sentinel"), Some(b"keep".to_vec()));
+        assert_eq!(store.cache_db.get(b"sentinel"), Some(b"keep".to_vec()));
+        assert_eq!(*store.indexed_headers.read().unwrap().tip(), hash);
+        assert_qbit_identity(&store);
+    }
+
+    #[test]
+    fn placeholder_qbit_store_is_cleared_before_reindex() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("newindex");
+        std::fs::create_dir_all(&path).unwrap();
+        let header = placeholder_qbit_mainnet_header();
+        let hash = header.block_hash();
+        {
+            let txstore = DB::open(&path.join("txstore"), false);
+            write_header(&txstore, &header);
+            txstore.put_sync(b"t", &serialize(&hash));
+            txstore.put_sync(b"sentinel", b"old txstore row");
+            let history = DB::open(&path.join("history"), false);
+            history.put_sync(b"sentinel", b"old history row");
+            let cache = DB::open(&path.join("cache"), false);
+            cache.put_sync(b"sentinel", b"old cache row");
+        }
+
+        let store = Store::open_for_network(&path, Network::Qbit, false);
+
+        assert!(store.indexed_headers.read().unwrap().is_empty());
+        assert!(store.txstore_db.get(b"t").is_none());
+        assert!(store.txstore_db.get(b"sentinel").is_none());
+        assert!(store.history_db.get(b"sentinel").is_none());
+        assert!(store.cache_db.get(b"sentinel").is_none());
+        assert_qbit_identity(&store);
+    }
+
+    #[test]
+    fn mixed_genesis_qbit_store_is_cleared_before_reindex() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("newindex");
+        std::fs::create_dir_all(&path).unwrap();
+        {
+            let txstore = DB::open(&path.join("txstore"), false);
+            write_header(&txstore, &placeholder_qbit_mainnet_header());
+            write_header(&txstore, &final_qbit_mainnet_header());
+            txstore.put_sync(b"sentinel", b"mixed roots");
+        }
+
+        let store = Store::open_for_network(&path, Network::Qbit, false);
+
+        assert!(store.txstore_db.get(b"sentinel").is_none());
+        assert!(load_blockheaders(&store.txstore_db).is_empty());
+        assert_qbit_identity(&store);
+    }
+
+    #[test]
+    fn stored_qbit_chain_marker_mismatch_is_cleared_before_reindex() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("newindex");
+        std::fs::create_dir_all(&path).unwrap();
+        {
+            let store = Store::open_for_network(&path, Network::QbitTestnet4, false);
+            store.txstore_db.put_sync(b"sentinel", b"wrong chain");
+        }
+
+        let store = Store::open_for_network(&path, Network::Qbit, false);
+
+        assert!(store.txstore_db.get(b"sentinel").is_none());
+        assert_qbit_identity(&store);
+    }
+
+    #[test]
+    fn interrupted_qbit_store_clear_resumes_before_reindex() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("newindex");
+        std::fs::create_dir_all(&path).unwrap();
+        {
+            let txstore = DB::open(&path.join("txstore"), false);
+            write_header(&txstore, &placeholder_qbit_mainnet_header());
+            txstore.put_sync(b"sentinel", b"old txstore row");
+            let history = DB::open(&path.join("history"), false);
+            history.put_sync(b"sentinel", b"old history row");
+            let cache = DB::open(&path.join("cache"), false);
+            cache.put_sync(b"sentinel", b"old cache row");
+        }
+
+        assert!(Store::open_checked(&path, Network::Qbit, false).is_err());
+        mark_reindex_required(&path);
+        std::fs::remove_dir_all(path.join("txstore")).unwrap();
+        std::fs::create_dir_all(path.join("txstore")).unwrap();
+        std::fs::write(path.join("txstore/CURRENT"), b"MANIFEST-999999\n").unwrap();
+
+        let store = Store::open_for_network(&path, Network::Qbit, false);
+
+        assert!(!reindex_required(&path));
+        assert!(store.txstore_db.get(b"sentinel").is_none());
+        assert!(store.history_db.get(b"sentinel").is_none());
+        assert!(store.cache_db.get(b"sentinel").is_none());
+        assert_qbit_identity(&store);
+    }
 
     #[test]
     fn qbit_raw_blocks_fetch_from_daemon_in_indexed_mode() {
