@@ -2,7 +2,6 @@ use rocksdb;
 
 use std::path::Path;
 
-use crate::config::Config;
 use crate::util::{bincode_util, Bytes};
 
 /// Each version will break any running instance with a DB that has a differing version.
@@ -146,11 +145,11 @@ pub enum DBFlush {
 }
 
 impl DB {
-    pub fn open(path: &Path, config: &Config) -> DB {
+    pub fn open(path: &Path, light_mode: bool) -> DB {
         let db = DB {
             db: open_raw_db(path, OpenMode::ReadWrite),
         };
-        db.verify_compatibility(config);
+        db.verify_compatibility(light_mode);
         db
     }
 
@@ -269,10 +268,10 @@ impl DB {
         self.db.get(key).unwrap().map(|v| v.to_vec())
     }
 
-    fn verify_compatibility(&self, config: &Config) {
+    fn verify_compatibility(&self, light_mode: bool) {
         let mut compatibility_bytes = bincode_util::serialize_little(&DB_VERSION).unwrap();
 
-        if config.light_mode {
+        if light_mode {
             // append a byte to indicate light_mode is enabled.
             // we're not letting bincode serialize this so that the compatiblity bytes won't change
             // (and require a reindex) when light_mode is disabled. this should be chagned the next

@@ -72,6 +72,13 @@ qbit source references at the source snapshot:
 - The mainnet row uses the final launch genesis from the mainnet launch source
   ref above, superseding the development/pre-launch placeholder in the public
   testnet snapshot.
+- Electrs persists the selected network name and genesis with its derived
+  index. When opening a legacy index without that marker, it verifies every
+  stored root header before adopting the index. A mismatched or mixed-genesis
+  index is not processed as a reorganization: Electrs clears only its derived
+  `txstore`, `history`, and `cache` databases and rebuilds them from the
+  selected daemon. The rebuild intent is persisted alongside those databases
+  before cleanup begins so an interrupted cleanup resumes on the next start.
 - The testnet4 row is the public testnet4 reset at this qbit ref: genesis time
   `1781704709`, nonce `2528738861`, bits `0x1a7f1ab5`, merkle root
   `66bf018c3377135cdc87f66ed4926b6a3be5aeef890841a3cfebaff9dfb91ed0`.
