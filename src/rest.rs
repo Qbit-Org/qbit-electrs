@@ -612,6 +612,97 @@ fn find_txid(
     }
 }
 
+/// The height of the block that confirms a transaction, if one does
+fn confirming_block_height(query: &Query, txid: &Txid) -> Option<u32> {
+    query
+        .chain()
+        .tx_confirming_block(txid)
+        .map(|block| block.height as u32)
+}
+
+/// A page of one or more scripts' history, newest first: their mempool transactions, then
+/// their confirmed ones. `after_txid` is the last transaction of the page before, found at
+/// `after_txid_location`. `mempool_history` and `chain_history` list the transactions after
+/// a cursor as Mempool::history and ChainQuery::history do, and `confirmed_height` gives
+/// the height of the block that confirms a transaction, if one does.
+fn history_page<M, F, C>(
+    after_txid: Option<&Txid>,
+    after_txid_location: TxidLocation,
+    max_txs: usize,
+    mempool_history: M,
+    confirmed_height: F,
+    chain_history: C,
+) -> Result<Vec<(Transaction, Option<BlockId>)>, HttpError>
+where
+    M: FnOnce(Option<&Txid>, usize) -> Vec<Transaction>,
+    F: FnOnce(&Txid) -> Option<u32>,
+    C: FnOnce(
+        Option<&Txid>,
+        Option<u32>,
+        usize,
+    ) -> Result<Vec<(Transaction, BlockId, u16)>, errors::Error>,
+{
+    let mut txs = vec![];
+
+    let (chain_after_txid, confirmed_block_height) = match after_txid_location {
+        TxidLocation::Mempool => {
+            txs.extend(
+                mempool_history(after_txid, max_txs)
+                    .into_iter()
+                    .map(|tx| (tx, None)),
+            );
+            match after_txid {
+                // The cursor may have been mined since find_txid found it in the mempool:
+                // the indexer adds a block before the mempool drops the block's
+                // transactions, and each mempool read takes its own lock, so the cursor can
+                // still be in the mempool, or can have left it before the read above, which
+                // then found nothing after it. A cursor that is confirmed now resumes the
+                // confirmed history right after itself, so the page doesn't repeat it or
+                // what was confirmed with it, whether or not mempool transactions followed.
+                Some(txid) if txs.len() < max_txs => match confirmed_height(txid) {
+                    Some(height) => (Some(txid), Some(height)),
+                    // Every mempool transaction comes before the confirmed ones, so the
+                    // confirmed history starts at its newest. The chain has no row for an
+                    // unconfirmed cursor to resume after.
+                    None => (None, None),
+                },
+                // no cursor, or a full page from the mempool alone
+                _ => (None, None),
+            }
+        }
+        TxidLocation::None => {
+            return Err(HttpError(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                String::from("after_txid not found"),
+            ));
+        }
+        TxidLocation::Chain(height) => (after_txid, Some(height)),
+    };
+
+    if txs.len() < max_txs {
+        let mut confirmed_txs = chain_history(
+            chain_after_txid,
+            confirmed_block_height,
+            max_txs - txs.len(),
+        )?;
+        confirmed_txs.sort_unstable_by(
+            |(_, blockid1, tx_position1), (_, blockid2, tx_position2)| {
+                blockid2
+                    .height
+                    .cmp(&blockid1.height)
+                    .then_with(|| tx_position2.cmp(tx_position1))
+            },
+        );
+        txs.extend(
+            confirmed_txs
+                .into_iter()
+                .map(|(tx, blockid, _)| (tx, Some(blockid))),
+        );
+    }
+
+    Ok(txs)
+}
+
 /// Prepare transactions to be serialized in a JSON response
 ///
 /// Any transactions with missing prevouts will be filtered out of the response, rather than returned with incorrect data.
@@ -960,69 +1051,25 @@ fn handle_request(
                 .get("after_txid")
                 .and_then(|s| s.parse::<Txid>().ok());
 
-            let mut txs = vec![];
-
             let after_txid_location = if let Some(txid) = &after_txid {
                 find_txid(txid, &query.mempool(), query.chain())
             } else {
                 TxidLocation::Mempool
             };
 
-            let confirmed_block_height = match after_txid_location {
-                TxidLocation::Mempool => {
-                    txs.extend(
-                        query
-                            .mempool()
-                            .history(&script_hash[..], after_txid.as_ref(), max_txs)
-                            .into_iter()
-                            .map(|tx| (tx, None)),
-                    );
-                    None
-                }
-                TxidLocation::None => {
-                    return Err(HttpError(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        String::from("after_txid not found"),
-                    ));
-                }
-                TxidLocation::Chain(height) => Some(height),
-            };
-
-            if txs.len() < max_txs {
-                let after_txid_ref = if !txs.is_empty() {
-                    // If there are any txs, we know mempool found the
-                    // after_txid IF it exists... so always return None.
-                    None
-                } else {
-                    after_txid.as_ref()
-                };
-                let mut confirmed_txs = query
-                    .chain()
-                    .history(
-                        &script_hash[..],
-                        after_txid_ref,
-                        confirmed_block_height,
-                        max_txs - txs.len(),
-                    )
-                    .map(|res| {
-                        res.map(|(tx, blockid, tx_position)| (tx, Some(blockid), tx_position))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                confirmed_txs.sort_unstable_by(
-                    |(_, blockid1, tx_position1), (_, blockid2, tx_position2)| {
-                        blockid2
-                            .as_ref()
-                            .map(|b| b.height)
-                            .cmp(&blockid1.as_ref().map(|b| b.height))
-                            .then_with(|| tx_position2.cmp(tx_position1))
-                    },
-                );
-                txs.extend(
-                    confirmed_txs
-                        .into_iter()
-                        .map(|(tx, blockid, _)| (tx, blockid)),
-                );
-            }
+            let txs = history_page(
+                after_txid.as_ref(),
+                after_txid_location,
+                max_txs,
+                |after_txid, limit| query.mempool().history(&script_hash[..], after_txid, limit),
+                |txid| confirming_block_height(query, txid),
+                |after_txid, start_height, limit| {
+                    query
+                        .chain()
+                        .history(&script_hash[..], after_txid, start_height, limit)
+                        .collect()
+                },
+            )?;
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
         }
@@ -1067,69 +1114,29 @@ fn handle_request(
                 .get("after_txid")
                 .and_then(|s| s.parse::<Txid>().ok());
 
-            let mut txs = vec![];
-
             let after_txid_location = if let Some(txid) = &after_txid {
                 find_txid(txid, &query.mempool(), query.chain())
             } else {
                 TxidLocation::Mempool
             };
 
-            let confirmed_block_height = match after_txid_location {
-                TxidLocation::Mempool => {
-                    txs.extend(
-                        query
-                            .mempool()
-                            .history_group(&script_hashes, after_txid.as_ref(), max_txs)
-                            .into_iter()
-                            .map(|tx| (tx, None)),
-                    );
-                    None
-                }
-                TxidLocation::None => {
-                    return Err(HttpError(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        String::from("after_txid not found"),
-                    ));
-                }
-                TxidLocation::Chain(height) => Some(height),
-            };
-
-            if txs.len() < max_txs {
-                let after_txid_ref = if !txs.is_empty() {
-                    // If there are any txs, we know mempool found the
-                    // after_txid IF it exists... so always return None.
-                    None
-                } else {
-                    after_txid.as_ref()
-                };
-                let mut confirmed_txs = query
-                    .chain()
-                    .history_group(
-                        &script_hashes,
-                        after_txid_ref,
-                        confirmed_block_height,
-                        max_txs - txs.len(),
-                    )
-                    .map(|res| {
-                        res.map(|(tx, blockid, tx_position)| (tx, Some(blockid), tx_position))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                confirmed_txs.sort_unstable_by(
-                    |(_, blockid1, tx_position1), (_, blockid2, tx_position2)| {
-                        blockid2
-                            .as_ref()
-                            .map(|b| b.height)
-                            .cmp(&blockid1.as_ref().map(|b| b.height))
-                            .then_with(|| tx_position2.cmp(tx_position1))
-                    },
-                );
-                txs.extend(
-                    confirmed_txs
-                        .into_iter()
-                        .map(|(tx, blockid, _)| (tx, blockid)),
-                );
-            }
+            let txs = history_page(
+                after_txid.as_ref(),
+                after_txid_location,
+                max_txs,
+                |after_txid, limit| {
+                    query
+                        .mempool()
+                        .history_group(&script_hashes, after_txid, limit)
+                },
+                |txid| confirming_block_height(query, txid),
+                |after_txid, start_height, limit| {
+                    query
+                        .chain()
+                        .history_group(&script_hashes, after_txid, start_height, limit)
+                        .collect()
+                },
+            )?;
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
         }
@@ -2527,6 +2534,187 @@ mod tests {
                 result, expected,
                 "Block {} difficulty is {} but Core difficulty is {}",
                 hash, result, core_difficulty,
+            );
+        }
+    }
+
+    // Transactions and history sources for the history_page tests
+    #[cfg(not(feature = "liquid"))]
+    mod history_fakes {
+        use crate::chain::{BlockHash, Transaction, Txid};
+        use crate::util::BlockId;
+
+        pub type ChainRow = (Transaction, BlockId, u16);
+
+        pub fn tx(n: u32) -> Transaction {
+            Transaction {
+                version: 2,
+                lock_time: n,
+                input: vec![],
+                output: vec![],
+            }
+        }
+
+        // confirmed transactions, newest first, each in a block below the one before
+        pub fn chain(txs: Vec<Transaction>, tip: usize) -> Vec<ChainRow> {
+            txs.into_iter()
+                .enumerate()
+                .map(|(i, tx)| {
+                    let blockid = BlockId {
+                        height: tip - i,
+                        hash: BlockHash::default(),
+                        time: 0,
+                    };
+                    (tx, blockid, 0)
+                })
+                .collect()
+        }
+
+        // what Mempool::history and ChainQuery::history list after a cursor: the rows past
+        // it, or none when it isn't among them
+        pub fn after<T: Clone>(
+            rows: &[T],
+            txid: fn(&T) -> Txid,
+            cursor: Option<&Txid>,
+            limit: usize,
+        ) -> Vec<T> {
+            rows.iter()
+                .skip_while(|row| cursor.is_some_and(|cursor| txid(row) != *cursor))
+                .skip(cursor.map_or(0, |_| 1))
+                .take(limit)
+                .cloned()
+                .collect()
+        }
+
+        pub fn row_txid(row: &ChainRow) -> Txid {
+            row.0.txid()
+        }
+
+        // the height ChainQuery::tx_confirming_block gives
+        pub fn confirmed_height(chain: &[ChainRow], txid: &Txid) -> Option<u32> {
+            chain
+                .iter()
+                .find(|row| row_txid(row) == *txid)
+                .map(|(_, blockid, _)| blockid.height as u32)
+        }
+
+        pub fn txids<'a>(txs: impl IntoIterator<Item = &'a Transaction>) -> Vec<Txid> {
+            txs.into_iter().map(Transaction::txid).collect()
+        }
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    #[test]
+    fn history_pages_continue_from_the_mempool_into_the_confirmed_history() {
+        use self::history_fakes::{after, chain, confirmed_height, row_txid, tx, txids};
+        use super::{history_page, TxidLocation};
+        use crate::chain::Txid;
+        use hyper::StatusCode;
+
+        // as many mempool transactions as a page holds, and more confirmed ones, each list
+        // newest first
+        let max_txs = 3;
+        let mempool: Vec<Transaction> = (0..3).map(tx).collect();
+        let chain = chain((3..8).map(tx).collect(), 97);
+        let confirmed: Vec<&Transaction> = chain.iter().map(|(tx, _, _)| tx).collect();
+        let page = |after_txid: Option<Txid>, location: TxidLocation| {
+            history_page(
+                after_txid.as_ref(),
+                location,
+                max_txs,
+                |cursor, limit| after(&mempool, Transaction::txid, cursor, limit),
+                |txid| confirmed_height(&chain, txid),
+                |cursor, _start_height, limit| Ok(after(&chain, row_txid, cursor, limit)),
+            )
+            .unwrap()
+        };
+
+        let first = page(None, TxidLocation::Mempool);
+        assert_eq!(txids(first.iter().map(|(tx, _)| tx)), txids(&mempool));
+
+        // after the last mempool transaction, the first confirmed page
+        let second = page(Some(mempool[2].txid()), TxidLocation::Mempool);
+        assert_eq!(
+            txids(second.iter().map(|(tx, _)| tx)),
+            txids(confirmed[..3].iter().copied())
+        );
+        assert!(second.iter().all(|(_, blockid)| blockid.is_some()));
+
+        // after a confirmed transaction, the rest of the confirmed history
+        let third = page(Some(confirmed[2].txid()), TxidLocation::Chain(95));
+        assert_eq!(
+            txids(third.iter().map(|(tx, _)| tx)),
+            txids(confirmed[3..].iter().copied())
+        );
+
+        // after an earlier mempool transaction, the rest of the mempool, then the newest
+        // confirmed one
+        let mid = page(Some(mempool[0].txid()), TxidLocation::Mempool);
+        assert_eq!(
+            txids(mid.iter().map(|(tx, _)| tx)),
+            txids(mempool[1..].iter().chain(confirmed[..1].iter().copied()))
+        );
+
+        let err = history_page(
+            Some(&tx(99).txid()),
+            TxidLocation::None,
+            max_txs,
+            |_, _| unreachable!(),
+            |_| unreachable!(),
+            |_, _, _| unreachable!(),
+        )
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.1, "after_txid not found");
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    #[test]
+    fn history_page_resumes_after_a_mempool_cursor_that_was_just_mined() {
+        use self::history_fakes::{after, chain, confirmed_height, row_txid, tx, txids};
+        use super::{history_page, TxidLocation};
+
+        // The client's cursor was in the address's mempool and has just been mined, so it
+        // now heads the confirmed history. find_txid still found it in the mempool: the
+        // indexer adds a block before the mempool drops its transactions. By the time the
+        // page reads the mempool again, the cursor may still be there, with or without an
+        // unconfirmed transaction after it, or gone.
+        let max_txs = 3;
+        let cursor = tx(1);
+        let unconfirmed = tx(9);
+        let chain = chain(vec![cursor.clone(), tx(2), tx(3), tx(4), tx(5)], 101);
+        let cases = [
+            (vec![tx(0), cursor.clone()], vec![]),
+            (
+                vec![tx(0), cursor.clone(), unconfirmed.clone()],
+                vec![&unconfirmed],
+            ),
+            (vec![tx(0)], vec![]),
+        ];
+        for (mempool, mempool_page) in cases {
+            let page = history_page(
+                Some(&cursor.txid()),
+                TxidLocation::Mempool,
+                max_txs,
+                |after_txid, limit| after(&mempool, Transaction::txid, after_txid, limit),
+                |txid| confirmed_height(&chain, txid),
+                |after_txid, start_height, limit| {
+                    assert_eq!(start_height, Some(101));
+                    Ok(after(&chain, row_txid, after_txid, limit))
+                },
+            )
+            .unwrap();
+
+            // what the mempool still holds after the cursor, then the confirmed history
+            // right after the cursor, without the cursor again
+            let rest = max_txs - mempool_page.len();
+            assert_eq!(
+                txids(page.iter().map(|(tx, _)| tx)),
+                txids(
+                    mempool_page
+                        .into_iter()
+                        .chain(chain[1..1 + rest].iter().map(|(tx, _, _)| tx))
+                )
             );
         }
     }
