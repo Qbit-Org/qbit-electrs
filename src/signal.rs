@@ -56,3 +56,14 @@ impl Waiter {
         }
     }
 }
+
+#[cfg(test)]
+impl Waiter {
+    /// A waiter no signal reaches: a wait on it only times out
+    pub fn for_tests() -> Waiter {
+        let (sender, receiver) = channel::bounded(1);
+        // keep the channel open, so a wait times out rather than failing as disconnected
+        std::mem::forget(sender);
+        Waiter { receiver }
+    }
+}

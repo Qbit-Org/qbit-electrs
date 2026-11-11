@@ -66,6 +66,17 @@ const CONF_FINAL: usize = 10; // reorgs deeper than this are considered unlikely
 // internal api prefix
 const INTERNAL_PREFIX: &str = "internal";
 
+// The most of a request body electrs reads on the routes that relay transactions to qbitd.
+// qbit's largest standard transaction is 400,000 bytes (qbitd's MAX_STANDARD_TX_WEIGHT at
+// a witness scale factor of 1): 800,000 hex characters, the size POST /txs/test and
+// /txs/package also allow each transaction. A body gets a quarter more for whatever
+// surrounds the hex. Larger bodies are refused before they are read: relayed, they could
+// pass qbitd's 32 MiB request limit, and qbitd drops such a request.
+const MAX_TX_HEX_LEN: usize = 2 * 400_000;
+const MAX_TX_BODY_LEN: usize = MAX_TX_HEX_LEN + MAX_TX_HEX_LEN / 4;
+// POST /txs/test and /txs/package take up to 25 transactions
+const MAX_TXS_BODY_LEN: usize = 25 * MAX_TX_BODY_LEN;
+
 #[derive(Serialize, Deserialize)]
 struct BlockValue {
     id: String,
@@ -591,6 +602,98 @@ fn ttl_by_depth(height: Option<usize>, query: &Query) -> u32 {
     })
 }
 
+/// The number of transactions a page holds: the request's max_txs, or `default` without
+/// one, and never more than `max`
+fn page_max_txs(query_params: &HashMap<String, String>, default: usize, max: usize) -> usize {
+    query_params
+        .get("max_txs")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(default)
+        .min(max)
+}
+
+// The history scans read a script's rows until they reach their cursor, so a cursor that
+// isn't in the script's history would have them read every row: work a client could
+// repeat at will. A cursor is checked first, with one transaction lookup and one for the
+// outputs it spends.
+
+/// Where a paging cursor is in one or more scripts' history. `find` reads under the guard
+/// `lock` takes, and that guard is released before `in_history` runs, which takes the
+/// mempool lock again. With the first read guard still held, a writer queued in between
+/// would wait for it, and std's RwLock on Linux makes the second read wait for the writer:
+/// the request and every mempool update would block for good.
+fn cursor_location<G>(
+    lock: impl FnOnce() -> G,
+    find: impl FnOnce(&G) -> TxidLocation,
+    in_history: impl FnOnce() -> bool,
+) -> TxidLocation {
+    let location = find(&lock());
+    history_txid_location(location, in_history)
+}
+
+/// Where a paging cursor is in one or more scripts' history: where find_txid found it, or
+/// nowhere when it neither funds nor spends any of the scripts
+fn history_txid_location(
+    location: TxidLocation,
+    in_history: impl FnOnce() -> bool,
+) -> TxidLocation {
+    if matches!(location, TxidLocation::None) || in_history() {
+        location
+    } else {
+        TxidLocation::None
+    }
+}
+
+/// Where a page of a script's confirmed history after `last_seen_txid` starts: at the
+/// newest confirmed transaction without a cursor (`Some(None)`), or at the block that
+/// confirms the cursor, which the scan seeks to (`Some(Some(height))`). `None` when the
+/// cursor isn't a confirmed transaction in the script's history, so nothing comes after it.
+fn chain_page_start(
+    last_seen_txid: Option<&Txid>,
+    confirmed_height: impl FnOnce(&Txid) -> Option<u32>,
+    in_history: impl FnOnce(&Txid) -> bool,
+) -> Option<Option<u32>> {
+    let txid = match last_seen_txid {
+        None => return Some(None),
+        Some(txid) => txid,
+    };
+    let height = confirmed_height(txid)?;
+    in_history(txid).then_some(Some(height))
+}
+
+/// Whether a transaction funds or spends one of the scripts, which is what puts it in
+/// their history
+fn tx_in_history(query: &Query, txid: &Txid, script_hashes: &[FullHash]) -> bool {
+    let tx = match query.lookup_txn(txid) {
+        Some(tx) => tx,
+        None => return false,
+    };
+    let spent = tx
+        .input
+        .iter()
+        .filter(|txin| has_prevout(txin))
+        .map(|txin| txin.previous_output)
+        .collect::<std::collections::BTreeSet<_>>();
+    touches_scripts(&tx, &query.lookup_txos(&spent), script_hashes)
+}
+
+/// Whether one of a transaction's outputs, or one of the outputs it spends, pays to one of
+/// the scripts
+fn touches_scripts(
+    tx: &Transaction,
+    prevouts: &HashMap<OutPoint, TxOut>,
+    script_hashes: &[FullHash],
+) -> bool {
+    tx.output
+        .iter()
+        .chain(
+            tx.input
+                .iter()
+                .filter_map(|txin| prevouts.get(&txin.previous_output)),
+        )
+        .any(|txout| script_hashes.contains(&compute_script_hash(&txout.script_pubkey)))
+}
+
 enum TxidLocation {
     Mempool,
     Chain(u32), // contains height
@@ -664,19 +767,22 @@ async fn run_server(
                 async move {
                     let method = req.method().clone();
                     let uri = req.uri().clone();
-                    let body = hyper::body::to_bytes(req.into_body()).await?;
+                    let body = read_body(req).await?;
 
-                    let mut resp = tokio::task::block_in_place(|| {
-                        handle_request(method, uri, body, &query, &config)
-                    })
-                    .unwrap_or_else(|err| {
-                        warn!("{:?}", err);
-                        Response::builder()
-                            .status(err.0)
-                            .header("Content-Type", "text/plain")
-                            .body(Body::from(err.1))
-                            .unwrap()
-                    });
+                    let mut resp = body
+                        .and_then(|body| {
+                            tokio::task::block_in_place(|| {
+                                handle_request(method, uri, body, &query, &config)
+                            })
+                        })
+                        .unwrap_or_else(|err| {
+                            warn!("{:?}", err);
+                            Response::builder()
+                                .status(err.0)
+                                .header("Content-Type", "text/plain")
+                                .body(Body::from(err.1))
+                                .unwrap()
+                        });
                     resp.headers_mut()
                         .insert("X-Powered-By", HeaderValue::from_static(&VERSION_STRING));
                     if let Some(ref origins) = config.cors {
@@ -732,6 +838,52 @@ async fn run_server(
     if let Err(e) = server {
         eprintln!("server error: {}", e);
     }
+}
+
+/// The most of a request body a route reads, for the routes that take transactions
+fn max_body_len(method: &Method, path: &str) -> Option<usize> {
+    match (method, path) {
+        (&Method::POST, "/tx") => Some(MAX_TX_BODY_LEN),
+        (&Method::POST, "/txs/test") | (&Method::POST, "/txs/package") => Some(MAX_TXS_BODY_LEN),
+        _ => None,
+    }
+}
+
+/// A request's body, up to its route's limit. A body over the limit, by its Content-Length
+/// or as it arrives, is refused with 413 without reading the rest of it.
+async fn read_body(
+    req: hyper::Request<Body>,
+) -> Result<Result<hyper::body::Bytes, HttpError>, hyper::Error> {
+    use hyper::body::HttpBody;
+
+    let limit = match max_body_len(req.method(), req.uri().path()) {
+        Some(limit) => limit,
+        None => return hyper::body::to_bytes(req.into_body()).await.map(Ok),
+    };
+    let too_large = || {
+        Err(HttpError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("Request body over {} bytes", limit),
+        ))
+    };
+    let declared_len = req
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|len| len.to_str().ok())
+        .and_then(|len| len.parse::<u64>().ok());
+    if declared_len.is_some_and(|len| len > limit as u64) {
+        return Ok(too_large());
+    }
+    let mut body = req.into_body();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk?;
+        if bytes.len() + chunk.len() > limit {
+            return Ok(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(Ok(bytes.into()))
 }
 
 pub fn start(config: Arc<Config>, query: Arc<Query>, metrics: &Metrics) -> Handle {
@@ -952,10 +1104,11 @@ fn handle_request(
             None,
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
-            let max_txs = query_params
-                .get("max_txs")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(config.rest_default_max_mempool_txs);
+            let max_txs = page_max_txs(
+                &query_params,
+                config.rest_default_max_mempool_txs,
+                config.rest_max_history_txs,
+            );
             let after_txid = query_params
                 .get("after_txid")
                 .and_then(|s| s.parse::<Txid>().ok());
@@ -963,7 +1116,11 @@ fn handle_request(
             let mut txs = vec![];
 
             let after_txid_location = if let Some(txid) = &after_txid {
-                find_txid(txid, &query.mempool(), query.chain())
+                cursor_location(
+                    || query.mempool(),
+                    |mempool| find_txid(txid, mempool, query.chain()),
+                    || tx_in_history(query, txid, &[script_hash]),
+                )
             } else {
                 TxidLocation::Mempool
             };
@@ -1059,10 +1216,11 @@ fn handle_request(
                 })
                 .collect();
 
-            let max_txs = query_params
-                .get("max_txs")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(config.rest_default_max_mempool_txs);
+            let max_txs = page_max_txs(
+                &query_params,
+                config.rest_default_max_mempool_txs,
+                config.rest_max_history_txs,
+            );
             let after_txid = query_params
                 .get("after_txid")
                 .and_then(|s| s.parse::<Txid>().ok());
@@ -1070,7 +1228,11 @@ fn handle_request(
             let mut txs = vec![];
 
             let after_txid_location = if let Some(txid) = &after_txid {
-                find_txid(txid, &query.mempool(), query.chain())
+                cursor_location(
+                    || query.mempool(),
+                    |mempool| find_txid(txid, mempool, query.chain()),
+                    || tx_in_history(query, txid, &script_hashes),
+                )
             } else {
                 TxidLocation::Mempool
             };
@@ -1152,14 +1314,34 @@ fn handle_request(
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
             let last_seen_txid = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok());
-            let max_txs = query_params
-                .get("max_txs")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(config.rest_default_chain_txs_per_page);
+            let max_txs = page_max_txs(
+                &query_params,
+                config.rest_default_chain_txs_per_page,
+                config.rest_max_history_txs,
+            );
 
+            let start_height = match chain_page_start(
+                last_seen_txid.as_ref(),
+                |txid| {
+                    query
+                        .chain()
+                        .tx_confirming_block(txid)
+                        .map(|block| block.height as u32)
+                },
+                |txid| tx_in_history(query, txid, &[script_hash]),
+            ) {
+                Some(start_height) => start_height,
+                // nothing comes after a cursor outside the script's confirmed history
+                None => return json_response(Vec::<TransactionValue>::new(), TTL_SHORT),
+            };
             let mut txs = query
                 .chain()
-                .history(&script_hash[..], last_seen_txid.as_ref(), None, max_txs)
+                .history(
+                    &script_hash[..],
+                    last_seen_txid.as_ref(),
+                    start_height,
+                    max_txs,
+                )
                 .map(|res| res.map(|(tx, blockid, tx_position)| (tx, Some(blockid), tx_position)))
                 .collect::<Result<Vec<_>, _>>()?;
             txs.sort_unstable_by(|(_, blockid1, tx_position1), (_, blockid2, tx_position2)| {
@@ -1207,7 +1389,11 @@ fn handle_request(
             );
 
             let last_seen_txid_location = if let Some(txid) = &last_seen_txid {
-                find_txid(txid, &query.mempool(), query.chain())
+                cursor_location(
+                    || query.mempool(),
+                    |mempool| find_txid(txid, mempool, query.chain()),
+                    || tx_in_history(query, txid, &[script_hash]),
+                )
             } else {
                 TxidLocation::Mempool
             };
@@ -1288,7 +1474,11 @@ fn handle_request(
             );
 
             let last_seen_txid_location = if let Some(txid) = &last_seen_txid {
-                find_txid(txid, &query.mempool(), query.chain())
+                cursor_location(
+                    || query.mempool(),
+                    |mempool| find_txid(txid, mempool, query.chain()),
+                    || tx_in_history(query, txid, &script_hashes),
+                )
             } else {
                 TxidLocation::Mempool
             };
@@ -1330,10 +1520,11 @@ fn handle_request(
             None,
         ) => {
             let script_hash = to_scripthash(script_type, script_str, config.network_type)?;
-            let max_txs = query_params
-                .get("max_txs")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(config.rest_default_max_mempool_txs);
+            let max_txs = page_max_txs(
+                &query_params,
+                config.rest_default_max_mempool_txs,
+                config.rest_max_history_txs,
+            );
 
             let txs = query
                 .mempool()
@@ -1721,10 +1912,12 @@ fn handle_request(
         }
         (&Method::GET, Some(&"mempool"), Some(&"txids"), Some(&"page"), last_seen_txid, None) => {
             let last_seen_txid = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok());
-            let max_txs = query_params
-                .get("max_txs")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(config.rest_max_mempool_txid_page_size);
+            // the option is the page's maximum as well as its default
+            let max_txs = page_max_txs(
+                &query_params,
+                config.rest_max_mempool_txid_page_size,
+                config.rest_max_mempool_txid_page_size,
+            );
             json_response(
                 query.mempool().txids_page(max_txs, last_seen_txid),
                 TTL_SHORT,
@@ -1779,10 +1972,12 @@ fn handle_request(
             None,
         ) => {
             let last_seen_txid = last_seen_txid.and_then(|txid| Txid::from_hex(txid).ok());
-            let max_txs = query_params
-                .get("max_txs")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(config.rest_max_mempool_page_size);
+            // the option is the page's maximum as well as its default
+            let max_txs = page_max_txs(
+                &query_params,
+                config.rest_max_mempool_page_size,
+                config.rest_max_mempool_page_size,
+            );
             let txs = query
                 .mempool()
                 .txs_page(max_txs, last_seen_txid)
@@ -2273,6 +2468,246 @@ mod tests {
             .map_or(10u32, |el| el.parse().unwrap_or(10u32))
             .min(30u32);
         assert_eq!(10, limit);
+    }
+
+    #[test]
+    fn page_max_txs_takes_the_request_up_to_the_cap() {
+        use super::page_max_txs;
+
+        let params = |max_txs: &str| -> HashMap<String, String> {
+            vec![("max_txs".to_string(), max_txs.to_string())]
+                .into_iter()
+                .collect()
+        };
+
+        // without a max_txs, or with one that doesn't parse: the route's default
+        assert_eq!(page_max_txs(&HashMap::new(), 50, 1000), 50);
+        assert_eq!(page_max_txs(&params("lots"), 50, 1000), 50);
+        // up to the cap: what the request asks for, 0 included
+        assert_eq!(page_max_txs(&params("10"), 50, 1000), 10);
+        assert_eq!(page_max_txs(&params("0"), 50, 1000), 0);
+        assert_eq!(page_max_txs(&params("1000"), 50, 1000), 1000);
+        // above it: the cap
+        assert_eq!(page_max_txs(&params("1001"), 50, 1000), 1000);
+        assert_eq!(page_max_txs(&params("100000000"), 50, 1000), 1000);
+        // a cap below the route's default lowers the default too
+        assert_eq!(page_max_txs(&HashMap::new(), 50, 20), 20);
+        // the mempool pages, whose option is both default and cap: the largest usize
+        // once reached Vec::with_capacity and aborted the server
+        assert_eq!(
+            page_max_txs(&params("18446744073709551615"), 1000, 1000),
+            1000
+        );
+        assert_eq!(
+            page_max_txs(&params("1000000000000000"), 10000, 10000),
+            10000
+        );
+        assert_eq!(page_max_txs(&HashMap::new(), 1000, 1000), 1000);
+    }
+
+    #[test]
+    fn a_cursor_lookup_releases_the_mempool_lock_before_taking_it_again() {
+        use super::{cursor_location, TxidLocation};
+        use std::sync::{mpsc, Arc, RwLock};
+        use std::time::Duration;
+
+        // A writer queued while a read guard is held waits for that guard, and std's
+        // RwLock on Linux then makes a new reader wait for the writer. If cursor_location
+        // still held find's guard when in_history reads again, both would wait for good.
+        let lock = Arc::new(RwLock::new(()));
+        let mut writer_got_the_lock = false;
+        let location = cursor_location(
+            || lock.read().unwrap(),
+            |_| TxidLocation::Mempool,
+            || {
+                let (done, written) = mpsc::channel();
+                let writer = Arc::clone(&lock);
+                std::thread::spawn(move || {
+                    let _guard = writer.write().unwrap();
+                    let _ = done.send(());
+                });
+                writer_got_the_lock = written.recv_timeout(Duration::from_secs(5)).is_ok();
+                // read again only when that can't hang, so a failure ends the test
+                if writer_got_the_lock {
+                    let _guard = lock.read().unwrap();
+                }
+                true
+            },
+        );
+
+        assert!(matches!(location, TxidLocation::Mempool));
+        assert!(
+            writer_got_the_lock,
+            "the read guard find took was still held when in_history read again"
+        );
+    }
+
+    #[test]
+    fn a_cursor_outside_the_scripts_history_is_not_found() {
+        use super::{chain_page_start, history_txid_location, TxidLocation};
+        use crate::chain::Txid;
+        use bitcoin::hashes::Hash;
+
+        let in_history = |found: bool| move || found;
+        // a cursor found in the history keeps its place
+        assert!(matches!(
+            history_txid_location(TxidLocation::Chain(7), in_history(true)),
+            TxidLocation::Chain(7)
+        ));
+        assert!(matches!(
+            history_txid_location(TxidLocation::Mempool, in_history(true)),
+            TxidLocation::Mempool
+        ));
+        // one that exists, but in neither these scripts' outputs nor what they spend, is
+        // as unknown as one found nowhere, which needs no lookup
+        assert!(matches!(
+            history_txid_location(TxidLocation::Chain(7), in_history(false)),
+            TxidLocation::None
+        ));
+        assert!(matches!(
+            history_txid_location(TxidLocation::Mempool, in_history(false)),
+            TxidLocation::None
+        ));
+        assert!(matches!(
+            history_txid_location(TxidLocation::None, || unreachable!()),
+            TxidLocation::None
+        ));
+
+        // /txs/chain resumes at the cursor's block, or lists nothing after a cursor that
+        // isn't a confirmed transaction in the script's history
+        let txid = Txid::from_inner([7; 32]);
+        assert_eq!(
+            chain_page_start(None, |_| unreachable!(), |_| unreachable!()),
+            Some(None)
+        );
+        assert_eq!(
+            chain_page_start(Some(&txid), |_| Some(95), |_| true),
+            Some(Some(95))
+        );
+        assert_eq!(chain_page_start(Some(&txid), |_| Some(95), |_| false), None);
+        assert_eq!(chain_page_start(Some(&txid), |_| None, |_| true), None);
+    }
+
+    #[cfg(not(feature = "liquid"))]
+    #[test]
+    fn a_transaction_is_in_the_history_of_the_scripts_it_pays_or_spends() {
+        use super::touches_scripts;
+        use crate::chain::{OutPoint, Script, TxIn, TxOut, Txid, Witness};
+        use bitcoin::hashes::Hash;
+
+        let script = |byte: u8| {
+            Script::from(
+                vec![0x52, 0x20]
+                    .into_iter()
+                    .chain([byte; 32])
+                    .collect::<Vec<u8>>(),
+            )
+        };
+        let spent = OutPoint {
+            txid: Txid::from_inner([1; 32]),
+            vout: 0,
+        };
+        let tx = Transaction {
+            version: 2,
+            lock_time: 0,
+            input: vec![TxIn {
+                previous_output: spent,
+                script_sig: Script::new(),
+                sequence: 0xffff_ffff,
+                witness: Witness::default(),
+            }],
+            output: vec![TxOut {
+                value: 1,
+                script_pubkey: script(0xaa),
+            }],
+        };
+        let prevouts: HashMap<OutPoint, TxOut> = vec![(
+            spent,
+            TxOut {
+                value: 2,
+                script_pubkey: script(0xbb),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let hash = |byte| compute_script_hash(&script(byte));
+
+        // funds one script, spends another, and touches neither of a third's
+        assert!(touches_scripts(&tx, &prevouts, &[hash(0xaa)]));
+        assert!(touches_scripts(&tx, &prevouts, &[hash(0xcc), hash(0xbb)]));
+        assert!(!touches_scripts(&tx, &prevouts, &[hash(0xcc)]));
+        assert!(!touches_scripts(&tx, &HashMap::new(), &[hash(0xbb)]));
+    }
+
+    #[test]
+    fn transaction_routes_refuse_a_body_over_their_limit() {
+        use super::{read_body, MAX_TXS_BODY_LEN, MAX_TX_BODY_LEN};
+        use hyper::{Body, Method, Request, StatusCode};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let read = |method: Method, path: &str, body: Vec<u8>, declared_len: Option<usize>| {
+            let mut req = Request::builder().method(method).uri(path);
+            if let Some(len) = declared_len {
+                req = req.header("Content-Length", len);
+            }
+            runtime
+                .block_on(read_body(req.body(Body::from(body)).unwrap()))
+                .unwrap()
+                .map(|body| body.len())
+        };
+        let too_large = |result: Result<usize, HttpError>| result.unwrap_err().0;
+
+        // a transaction at its limit, and 25 for /txs/test and /txs/package
+        assert_eq!(
+            read(Method::POST, "/tx", vec![b'0'; MAX_TX_BODY_LEN], None).ok(),
+            Some(MAX_TX_BODY_LEN)
+        );
+        assert_eq!(
+            read(
+                Method::POST,
+                "/txs/package",
+                vec![b'0'; MAX_TXS_BODY_LEN],
+                None
+            )
+            .ok(),
+            Some(MAX_TXS_BODY_LEN)
+        );
+        // a byte more, as sent or as declared before any of it is read
+        assert_eq!(
+            too_large(read(
+                Method::POST,
+                "/tx",
+                vec![b'0'; MAX_TX_BODY_LEN + 1],
+                None
+            )),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            too_large(read(Method::POST, "/tx", vec![], Some(MAX_TX_BODY_LEN + 1))),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            too_large(read(
+                Method::POST,
+                "/txs/test",
+                vec![b'0'; MAX_TXS_BODY_LEN + 1],
+                None
+            )),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        // other routes read their bodies as before
+        assert_eq!(
+            read(
+                Method::POST,
+                "/internal/txs",
+                vec![b'0'; MAX_TX_BODY_LEN + 1],
+                None
+            )
+            .ok(),
+            Some(MAX_TX_BODY_LEN + 1)
+        );
     }
 
     #[test]

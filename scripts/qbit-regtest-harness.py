@@ -23,6 +23,7 @@ import socket
 import subprocess
 import sys
 import time
+import http.client
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -290,6 +291,7 @@ class Harness:
         self.monitoring_port = free_port()
         self.wallet_name = "harness"
         self.p2mr_address = ""
+        self.padding_address = ""
         self.spend_address = ""
         self.spend_script_hash = ""
         self.spend_electrum_scripthash = ""
@@ -339,6 +341,7 @@ class Harness:
         self.start_electrs()
         self.wait_for_electrs_tip()
         self.check_rest_parity()
+        self.check_rest_request_bounds()
         self.check_electrum_parity()
         self.check_electrum_fee_methods()
         self.create_p2mr_mempool_spend()
@@ -657,6 +660,7 @@ class Harness:
         self.best_height = int(chain["blocks"])
         self.best_hash = str(chain["bestblockhash"])
         self.p2mr_address = address
+        self.padding_address = padding_address
 
     def start_electrs(self) -> None:
         assert self.electrs_bin is not None
@@ -745,6 +749,73 @@ class Harness:
         mempool_txids = http_json(self.http_port, "/mempool/txids")
         if mempool_txids != []:
             raise HarnessError(f"expected empty mempool after mining-only smoke: {mempool_txids}")
+
+    def check_rest_request_bounds(self) -> None:
+        def call(path: str, body: object = None) -> tuple[int, str]:
+            data = None if body is None else json.dumps(body).encode()
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{self.http_port}{path}",
+                data=data,
+                headers={"Content-Type": "application/json"} if data else {},
+                method="GET" if data is None else "POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    return response.status, response.read().decode()
+            except urllib.error.HTTPError as err:
+                return err.code, err.read().decode()
+
+        # Page sizes past every cap get a capped page, and the server stays up: the
+        # largest usize once reached Vec::with_capacity on /internal/mempool/txs.
+        largest = 2**64 - 1
+        for path in (
+            f"/internal/mempool/txs?max_txs={largest}",
+            f"/mempool/txids/page?max_txs={largest}",
+            f"/address/{self.padding_address}/txs/chain?max_txs={largest}",
+        ):
+            status, text = call(path)
+            if status != 200 or not isinstance(json.loads(text), list):
+                raise HarnessError(f"REST {path} should answer a capped page: {status} {text[:200]}")
+
+        # Paging the padding address's coinbases with /txs/chain/:last_seen resumes right
+        # after the cursor, now found by seeking to its block.
+        chain_base = f"/address/{self.padding_address}/txs/chain"
+        first = [tx.get("txid") for tx in http_json(self.http_port, chain_base)]
+        both = [
+            tx.get("txid")
+            for tx in http_json(self.http_port, f"{chain_base}?max_txs={2 * len(first)}")
+        ]
+        second = [tx.get("txid") for tx in http_json(self.http_port, f"{chain_base}/{first[-1]}")]
+        if not first or not second or second != both[len(first) :]:
+            raise HarnessError(f"REST /txs/chain paging mismatch: {first[-3:]} {second[:3]} {both[len(first):][:3]}")
+
+        # A cursor outside the probe address's history: a padding coinbase, which exists
+        # but neither pays nor spends the probe address. The history routes answer at
+        # once instead of reading every row looking for it.
+        foreign = first[0]
+        probe = f"/address/{self.p2mr_address}"
+        for path, body, expected in (
+            (f"{probe}/txs?after_txid={foreign}", None, (422, "after_txid not found")),
+            (f"{probe}/txs/summary/{foreign}", None, (422, "after_txid not found")),
+            (f"/addresses/txs?after_txid={foreign}", [self.p2mr_address], (422, "after_txid not found")),
+            (f"{probe}/txs/chain/{foreign}", None, (200, "[]")),
+        ):
+            got = call(path, body)
+            if got != expected:
+                raise HarnessError(f"REST {path} with a cursor outside its history: {got}, expected {expected}")
+
+        # A transaction body over the limit is refused by its Content-Length, before it
+        # is read or relayed to qbitd.
+        conn = http.client.HTTPConnection("127.0.0.1", self.http_port, timeout=30)
+        try:
+            conn.putrequest("POST", "/tx")
+            conn.putheader("Content-Length", str(2_000_000))
+            conn.endheaders()
+            status = conn.getresponse().status
+        finally:
+            conn.close()
+        if status != 413:
+            raise HarnessError(f"REST POST /tx over the body limit should answer 413, not {status}")
 
     def check_electrum_parity(self) -> None:
         with socket.create_connection(("127.0.0.1", self.electrum_port), timeout=5) as sock:

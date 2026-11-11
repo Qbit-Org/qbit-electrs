@@ -34,6 +34,14 @@ const DEFAULT_TX_BATCH_SIZE: usize = 50_000;
 const QBIT_TX_BATCH_SIZE: usize = 128;
 const MIN_SUPPORTED_BITCOIND_VERSION: u64 = 16_00_00;
 
+// A call a client waits on, such as a broadcast, is tried this many times before its
+// connection error is returned, instead of being retried until the daemon answers.
+const RELAY_ATTEMPTS: usize = 3;
+#[cfg(not(test))]
+const RELAY_RETRY_DELAY: Duration = Duration::from_secs(3);
+#[cfg(test)]
+const RELAY_RETRY_DELAY: Duration = Duration::from_millis(10);
+
 fn tx_batch_size(network: Network) -> usize {
     if network.is_qbit() {
         QBIT_TX_BATCH_SIZE
@@ -312,6 +320,15 @@ impl Connection {
         signal: Waiter,
     ) -> Result<Connection> {
         let conn = tcp_connect(addr, &signal)?;
+        Connection::over(conn, addr, cookie_getter, signal)
+    }
+
+    fn over(
+        conn: TcpStream,
+        addr: SocketAddr,
+        cookie_getter: Arc<dyn CookieGetter>,
+        signal: Waiter,
+    ) -> Result<Connection> {
         let reader = BufReader::new(
             conn.try_clone()
                 .chain_err(|| format!("failed to clone {:?}", conn))?,
@@ -327,6 +344,19 @@ impl Connection {
 
     fn reconnect(&self) -> Result<Connection> {
         Connection::new(self.addr, self.cookie_getter.clone(), self.signal.clone())
+    }
+
+    /// One attempt to reconnect, where reconnect waits until the daemon answers
+    fn reconnect_once(&self) -> Result<Connection> {
+        let conn = TcpStream::connect_timeout(&self.addr, RELAY_RETRY_DELAY).chain_err(|| {
+            ErrorKind::Connection(format!("failed to connect daemon at {}", self.addr))
+        })?;
+        Connection::over(
+            conn,
+            self.addr,
+            self.cookie_getter.clone(),
+            self.signal.clone(),
+        )
     }
 
     fn send(&mut self, request: &str) -> Result<()> {
@@ -638,6 +668,36 @@ impl Daemon {
         Ok(values.remove(0))
     }
 
+    /// A call a client waits on, such as a broadcast. Like any other call, it's retried
+    /// after a connection error, but only RELAY_ATTEMPTS times in all, with one attempt to
+    /// reconnect before each retry. A request the daemon keeps dropping would otherwise be
+    /// resent forever while the client's REST worker waits.
+    fn relay_request(&self, method: &str, params: Value) -> Result<Value> {
+        let params_list = [params];
+        let mut attempt = 1;
+        loop {
+            match self.handle_request_batch(method, &params_list, 0.0) {
+                Err(Error(ErrorKind::Connection(msg), _)) if attempt < RELAY_ATTEMPTS => {
+                    warn!(
+                        "{} failed ({}/{}), reconnecting to bitcoind: {}",
+                        method, attempt, RELAY_ATTEMPTS, msg
+                    );
+                    self.signal.wait(RELAY_RETRY_DELAY, false)?;
+                    let mut conn = self.conn.lock().unwrap();
+                    if let Ok(reconnected) = conn.reconnect_once() {
+                        *conn = reconnected;
+                    }
+                    attempt += 1;
+                }
+                result => {
+                    let mut values = result?;
+                    assert_eq!(values.len(), 1);
+                    return Ok(values.remove(0));
+                }
+            }
+        }
+    }
+
     fn requests(&self, method: &str, params_list: &[Value]) -> Result<Vec<Value>> {
         self.retry_request_batch(method, params_list, 0.0)
     }
@@ -773,7 +833,7 @@ impl Daemon {
     }
 
     pub fn broadcast_raw(&self, txhex: &str) -> Result<Txid> {
-        let txid = self.request("sendrawtransaction", json!([txhex]))?;
+        let txid = self.relay_request("sendrawtransaction", json!([txhex]))?;
         Txid::from_hex(txid.as_str().chain_err(|| "non-string txid")?)
             .chain_err(|| "failed to parse txid")
     }
@@ -787,7 +847,7 @@ impl Daemon {
             Some(rate) => json!([txhex, format!("{:.8}", rate)]),
             None => json!([txhex]),
         };
-        let result = self.request("testmempoolaccept", params)?;
+        let result = self.relay_request("testmempoolaccept", params)?;
         serde_json::from_value::<Vec<MempoolAcceptResult>>(result)
             .chain_err(|| "invalid testmempoolaccept reply")
     }
@@ -806,7 +866,7 @@ impl Daemon {
             (None, Some(burn)) => json!([txhex, null, format!("{:.8}", burn)]),
             (None, None) => json!([txhex]),
         };
-        let result = self.request("submitpackage", params)?;
+        let result = self.relay_request("submitpackage", params)?;
         serde_json::from_value::<SubmitPackageResult>(result)
             .chain_err(|| "invalid submitpackage reply")
     }
@@ -941,6 +1001,54 @@ mod tests {
             subversion: subversion.to_string(),
             relayfee: 0.0,
         }
+    }
+
+    struct TestCookie;
+
+    impl CookieGetter for TestCookie {
+        fn get(&self) -> Result<Vec<u8>> {
+            Ok(b"user:password".to_vec())
+        }
+    }
+
+    #[test]
+    fn a_broadcast_the_daemon_keeps_dropping_gives_up() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        // a daemon that reads each request and closes the connection without answering,
+        // as qbitd does with a request over its body limit
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let _ = stream.unwrap().read(&mut [0u8; 4096]);
+            }
+        });
+        let signal = Waiter::for_tests();
+        let metrics = Metrics::new(addr);
+        let daemon = Daemon {
+            daemon_dir: PathBuf::new(),
+            blocks_dir: PathBuf::new(),
+            network: Network::QbitRegtest,
+            magic: None,
+            conn: Mutex::new(Connection::new(addr, Arc::new(TestCookie), signal.clone()).unwrap()),
+            message_id: Counter::new(),
+            signal,
+            latency: metrics.histogram_vec(HistogramOpts::new("daemon_rpc", "-"), &["method"]),
+            size: metrics
+                .histogram_vec(HistogramOpts::new("daemon_bytes", "-"), &["method", "dir"]),
+        };
+
+        let (done, broadcast) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(daemon.broadcast_raw("00").map_err(|err| err.to_string()));
+        });
+        let err = broadcast
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a broadcast should give up instead of resending forever")
+            .expect_err("the daemon never answers");
+        assert!(err.starts_with("Connection error"), "{}", err);
     }
 
     #[test]

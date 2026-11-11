@@ -80,6 +80,7 @@ pub struct Config {
     pub rest_default_chain_txs_per_page: usize,
     pub rest_default_max_mempool_txs: usize,
     pub rest_default_max_address_summary_txs: usize,
+    pub rest_max_history_txs: usize,
     pub rest_max_mempool_page_size: usize,
     pub rest_max_mempool_txid_page_size: usize,
 
@@ -400,6 +401,12 @@ impl Config {
                     .default_value("5000")
             )
             .arg(
+                Arg::with_name("rest_max_history_txs")
+                    .long("rest-max-history-txs")
+                    .help("The maximum number of transactions returned by the address and scripthash txs, txs/chain and txs/mempool endpoints. A larger max_txs is lowered to it.")
+                    .default_value("1000")
+            )
+            .arg(
                 Arg::with_name("rest_max_mempool_page_size")
                     .long("rest-max-mempool-page-size")
                     .help("The maximum number of transactions returned by the paginated /internal/mempool/txs endpoint.")
@@ -591,6 +598,7 @@ impl Config {
                 "rest_default_max_address_summary_txs",
                 usize
             ),
+            rest_max_history_txs: value_t_or_exit!(m, "rest_max_history_txs", usize),
             rest_max_mempool_page_size: value_t_or_exit!(m, "rest_max_mempool_page_size", usize),
             rest_max_mempool_txid_page_size: value_t_or_exit!(
                 m,

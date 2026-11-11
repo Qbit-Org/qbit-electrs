@@ -358,20 +358,7 @@ impl Mempool {
     // Get n txs after the given txid in the mempool
     pub fn txs_page(&self, n: usize, start: Option<Txid>) -> Vec<Transaction> {
         let _timer = self.latency.with_label_values(&["txs_page"]).start_timer();
-        let mut page = Vec::with_capacity(n);
-        let start_bound = match start {
-            Some(txid) => Excluded(txid),
-            None => Unbounded,
-        };
-
-        self.txstore
-            .range((start_bound, Unbounded))
-            .take(n)
-            .for_each(|(_, value)| {
-                page.push(value.clone());
-            });
-
-        page
+        page_after(&self.txstore, n, start)
     }
 
     // Get an overview of the most recent transactions
@@ -695,6 +682,24 @@ impl Mempool {
     }
 }
 
+/// Up to `n` of a map's values after `start`, in key order. n can come from a request, so
+/// no more is reserved than the map can fill.
+fn page_after<K: Ord, V: Clone>(map: &BTreeMap<K, V>, n: usize, start: Option<K>) -> Vec<V> {
+    let mut page = Vec::with_capacity(n.min(map.len()));
+    let start_bound = match start {
+        Some(key) => Excluded(key),
+        None => Unbounded,
+    };
+
+    map.range((start_bound, Unbounded))
+        .take(n)
+        .for_each(|(_, value)| {
+            page.push(value.clone());
+        });
+
+    page
+}
+
 #[derive(Serialize)]
 pub struct BacklogStats {
     pub count: u32,
@@ -726,5 +731,23 @@ impl BacklogStats {
             total_fee,
             fee_histogram: make_fee_histogram(feeinfo.values().collect()),
         }
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::page_after;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn a_page_holds_what_follows_its_start_however_many_are_asked_for() {
+        let map: BTreeMap<u32, u32> = (0..5).map(|n| (n, n * 10)).collect();
+
+        assert_eq!(page_after(&map, 2, None), vec![0, 10]);
+        assert_eq!(page_after(&map, 2, Some(2)), vec![30, 40]);
+        // a request's max_txs reached the capacity unchanged, and the largest usize
+        // overflowed it
+        assert_eq!(page_after(&map, usize::MAX, Some(0)), vec![10, 20, 30, 40]);
+        assert_eq!(page_after(&map, usize::MAX, Some(4)), Vec::<u32>::new());
     }
 }
