@@ -176,10 +176,12 @@ The qbit-specific opcode names from the qbit source snapshot are:
 | `OP_CHECKDATASIGPQC` | `0xbc` |
 | `OP_CHECKDATASIGADDPQC` | `0xbd` |
 
-The electrs REST `sigops` field mirrors qbit's legacy block-level sigop count.
-P2MR script validation is bounded by per-input validation weight and contributes
-zero to that legacy sigop counter; electrs does not expose a separate explorer
-PQC operation count in the initial qbit port.
+The electrs REST `sigops` field is a transaction's sigop cost as qbitd counts it
+against the block limit (`GetTransactionSigOpCost`): each legacy and P2SH sigop
+once, at qbit's `WITNESS_SCALE_FACTOR` of 1, plus its v0 witness sigops. P2MR
+script validation is bounded by per-input validation weight and contributes zero
+to that count; electrs does not expose a separate explorer PQC operation count in
+the initial qbit port.
 
 ## AuxPoW Block Layout
 

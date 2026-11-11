@@ -123,14 +123,18 @@ pub(super) mod sigops {
             All,
         },
         script::{self, Instruction},
-        Transaction, TxOut, Witness,
+        Network, Transaction, TxOut, Witness,
     };
     use std::collections::HashMap;
 
-    /// Get sigop count for transaction. prevout_map must have all the prevouts.
+    /// Get the sigop cost of a transaction as the network's node counts it
+    /// (GetTransactionSigOpCost): its legacy and P2SH sigops count the network's witness
+    /// scale factor times each, and its witness sigops once. prevout_map must have all the
+    /// prevouts.
     pub fn transaction_sigop_count(
         tx: &Transaction,
         prevout_map: &HashMap<u32, &TxOut>,
+        network: Network,
     ) -> Result<usize, script::Error> {
         let input_count = tx.input.len();
         let mut prevouts = Vec::with_capacity(input_count);
@@ -151,7 +155,17 @@ pub(super) mod sigops {
         }
 
         // coinbase tx won't use prevouts so it can be empty.
-        get_sigop_cost(tx, &prevouts, true, true)
+        get_sigop_cost(tx, &prevouts, true, true, witness_scale_factor(network))
+    }
+
+    /// Bitcoin's and Elements' WITNESS_SCALE_FACTOR is 4. qbit's is 1, so qbitd counts a
+    /// legacy or P2SH sigop once.
+    fn witness_scale_factor(network: Network) -> usize {
+        if network.is_qbit() {
+            crate::qbit_codec::WITNESS_SCALE_FACTOR
+        } else {
+            bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR
+        }
     }
 
     fn decode_pushnum(op: &All) -> Option<u8> {
@@ -187,10 +201,11 @@ pub(super) mod sigops {
                                 }
                             }
                         }
-                        _ => {
-                            pushnum_cache = decode_pushnum(&opcode);
-                        }
+                        _ => {}
                     }
+                    // GetSigOpCount sets lastOpcode after every opcode, the sigop ones
+                    // included, so an OP_N only counts for the opcode right after it
+                    pushnum_cache = decode_pushnum(&opcode);
                 }
                 // We ignore errors as well as pushdatas
                 _ => {
@@ -304,8 +319,9 @@ pub(super) mod sigops {
         previous_outputs: &[&TxOut],
         verify_p2sh: bool,
         verify_witness: bool,
+        witness_scale_factor: usize,
     ) -> Result<usize, script::Error> {
-        let mut n_sigop_cost = get_legacy_sigop_count(tx) * 4;
+        let mut n_sigop_cost = get_legacy_sigop_count(tx) * witness_scale_factor;
         #[cfg(not(feature = "liquid"))]
         if tx.is_coin_base() {
             return Ok(n_sigop_cost);
@@ -321,7 +337,7 @@ pub(super) mod sigops {
             return Err(script::Error::EarlyEndOfScript);
         }
         if verify_p2sh {
-            n_sigop_cost += get_p2sh_sigop_count(tx, previous_outputs) * 4;
+            n_sigop_cost += get_p2sh_sigop_count(tx, previous_outputs) * witness_scale_factor;
         }
         if verify_witness {
             n_sigop_cost += get_witness_sigop_count(tx, previous_outputs);
@@ -397,7 +413,175 @@ pub(super) mod sigops {
             let mut prevouts = HashMap::new();
             prevouts.insert(0, &prevout);
 
-            assert_eq!(transaction_sigop_count(&tx, &prevouts).unwrap(), 0);
+            assert_eq!(
+                transaction_sigop_count(&tx, &prevouts, Network::QbitRegtest).unwrap(),
+                0
+            );
+        }
+
+        fn p2mr_script() -> Script {
+            let mut script = vec![0x52, 0x20];
+            script.extend_from_slice(&[0x00; 32]);
+            Script::from(script)
+        }
+
+        #[test]
+        fn qbit_counts_a_coinbase_legacy_sigop_once() {
+            // a height push, then an OP_CHECKMULTISIG byte, as in mainnet coinbase
+            // 9f62a6f8c688f7b23a5813771a49c161b905b61f3c1554e97b6b5ee04897bb29. qbitd's
+            // GetLegacySigOpCount gives 20, and a coinbase's sigop cost is that times
+            // WITNESS_SCALE_FACTOR, 1 on qbit.
+            let coinbase = Transaction {
+                version: 2,
+                lock_time: 0,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: Script::from(vec![0x03, 0x2a, 0x00, 0x00, 0xae]),
+                    sequence: 0xffff_ffff,
+                    witness: Witness::default(),
+                }],
+                output: vec![TxOut {
+                    value: 21_000_000_000,
+                    script_pubkey: p2mr_script(),
+                }],
+            };
+            let no_prevouts = HashMap::new();
+
+            for network in [Network::Qbit, Network::QbitTestnet4, Network::QbitRegtest] {
+                assert_eq!(
+                    transaction_sigop_count(&coinbase, &no_prevouts, network).unwrap(),
+                    20,
+                    "{:?}",
+                    network
+                );
+            }
+            // Bitcoin's WITNESS_SCALE_FACTOR is 4
+            assert_eq!(
+                transaction_sigop_count(&coinbase, &no_prevouts, Network::Bitcoin).unwrap(),
+                80
+            );
+        }
+
+        #[test]
+        fn qbit_counts_legacy_and_p2sh_sigops_once_and_witness_sigops_as_before() {
+            // P2SH (on qbit regtest with -p2mronly=0) spending a 1-of-1 multisig redeem
+            // script: 1 P2SH sigop
+            let mut redeem_script = vec![0x51, 0x21];
+            redeem_script.extend_from_slice(&[0x02; 33]);
+            redeem_script.extend_from_slice(&[0x51, 0xae]);
+            let mut p2sh_script_sig = vec![0x00, 0x01, 0x30, redeem_script.len() as u8];
+            p2sh_script_sig.extend_from_slice(&redeem_script);
+            let mut p2sh = vec![0xa9, 0x14];
+            p2sh.extend_from_slice(&[0x22; 20]);
+            p2sh.push(0x87);
+            let p2sh_prevout = TxOut {
+                value: 7,
+                script_pubkey: Script::from(p2sh),
+            };
+            // P2WSH with a <key> OP_CHECKSIG witness script: 1 witness sigop
+            let mut witness_script = vec![0x21];
+            witness_script.extend_from_slice(&[0x03; 33]);
+            witness_script.push(0xac);
+            let mut p2wsh = vec![0x00, 0x20];
+            p2wsh.extend_from_slice(&[0x33; 32]);
+            let p2wsh_prevout = TxOut {
+                value: 7,
+                script_pubkey: Script::from(p2wsh),
+            };
+            let tx = Transaction {
+                version: 2,
+                lock_time: 0,
+                input: vec![
+                    TxIn {
+                        previous_output: OutPoint {
+                            txid: txid(),
+                            vout: 0,
+                        },
+                        script_sig: Script::from(p2sh_script_sig),
+                        sequence: 0xffff_ffff,
+                        witness: Witness::default(),
+                    },
+                    TxIn {
+                        previous_output: OutPoint {
+                            txid: txid(),
+                            vout: 1,
+                        },
+                        script_sig: Script::new(),
+                        sequence: 0xffff_ffff,
+                        witness: Witness::from_vec(vec![vec![0x30], witness_script]),
+                    },
+                ],
+                // OP_RETURN OP_CHECKSIG: 1 legacy sigop
+                output: vec![TxOut {
+                    value: 0,
+                    script_pubkey: Script::from(vec![0x6a, 0xac]),
+                }],
+            };
+            let mut prevouts = HashMap::new();
+            prevouts.insert(0, &p2sh_prevout);
+            prevouts.insert(1, &p2wsh_prevout);
+
+            // qbitd's GetTransactionSigOpCost at a WITNESS_SCALE_FACTOR of 1: 1 + 1 + 1
+            assert_eq!(
+                transaction_sigop_count(&tx, &prevouts, Network::QbitRegtest).unwrap(),
+                3
+            );
+            // and Bitcoin's at 4: 4 * 1 + 4 * 1 + 1
+            assert_eq!(
+                transaction_sigop_count(&tx, &prevouts, Network::Bitcoin).unwrap(),
+                9
+            );
+        }
+
+        #[test]
+        fn an_op_n_counts_only_for_the_opcode_right_after_it() {
+            // qbitd's GetSigOpCount, counting accurately: an OP_CHECKMULTISIG right after
+            // OP_1 to OP_16 counts N, and any other one 20
+            let count =
+                |bytes: &[u8], accurate| count_sigops(&Script::from(bytes.to_vec()), accurate);
+            // OP_2 OP_CHECKMULTISIG
+            assert_eq!(count(&[0x52, 0xae], true), 2);
+            // OP_2 OP_CHECKMULTISIG OP_CHECKMULTISIG
+            assert_eq!(count(&[0x52, 0xae, 0xae], true), 2 + 20);
+            // OP_2 OP_CHECKSIG OP_CHECKMULTISIG
+            assert_eq!(count(&[0x52, 0xac, 0xae], true), 1 + 20);
+            // OP_2 OP_CHECKSIGVERIFY OP_CHECKMULTISIGVERIFY
+            assert_eq!(count(&[0x52, 0xad, 0xaf], true), 1 + 20);
+            // counting inaccurately, every OP_CHECKMULTISIG is 20
+            assert_eq!(count(&[0x52, 0xae, 0xae], false), 20 + 20);
+        }
+
+        #[test]
+        fn witness_sigops_count_a_stale_op_n_as_20() {
+            // a P2WSH spend whose witness script is OP_2 OP_CHECKMULTISIG OP_CHECKMULTISIG
+            let witness_script = vec![0x52, 0xae, 0xae];
+            let mut p2wsh = vec![0x00, 0x20];
+            p2wsh.extend_from_slice(&[0x33; 32]);
+            let prevout = TxOut {
+                value: 7,
+                script_pubkey: Script::from(p2wsh),
+            };
+            let tx = Transaction {
+                version: 2,
+                lock_time: 0,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: txid(),
+                        vout: 0,
+                    },
+                    script_sig: Script::new(),
+                    sequence: 0xffff_ffff,
+                    witness: Witness::from_vec(vec![vec![], witness_script]),
+                }],
+                output: vec![],
+            };
+            let mut prevouts = HashMap::new();
+            prevouts.insert(0, &prevout);
+
+            assert_eq!(
+                transaction_sigop_count(&tx, &prevouts, Network::QbitRegtest).unwrap(),
+                2 + 20
+            );
         }
     }
 }

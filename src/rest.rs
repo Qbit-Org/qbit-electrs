@@ -179,7 +179,7 @@ impl TransactionValue {
         config: &Config,
     ) -> Result<Self, errors::Error> {
         let prevouts = extract_tx_prevouts(&tx, txos)?;
-        let sigops = transaction_sigop_count(&tx, &prevouts)
+        let sigops = transaction_sigop_count(&tx, &prevouts, config.network_type)
             .map_err(|_| errors::Error::from("Couldn't count sigops"))? as u32;
 
         let vins: Vec<TxInValue> = tx
@@ -910,10 +910,12 @@ fn handle_request(
                 .skip(start_index)
                 .take(config.rest_default_chain_txs_per_page)
                 .map(|txid| {
+                    // the block's txids are indexed, so a transaction missing here is
+                    // electrs's failure, not the request's
                     query
                         .lookup_txn(txid)
                         .map(|tx| (tx, confirmed_blockid.clone()))
-                        .ok_or_else(|| "missing tx".to_string())
+                        .ok_or_else(|| HttpError::internal("missing tx".to_string()))
                 })
                 .collect::<Result<Vec<(Transaction, Option<BlockId>)>, _>>()?;
 
@@ -1520,14 +1522,13 @@ fn handle_request(
                     .ok_or_else(|| HttpError::from("Missing tx".to_string()))?,
                 _ => return http_message(StatusCode::METHOD_NOT_ALLOWED, "Invalid method", 0),
             };
-            let txid = query
-                .broadcast_raw(&txhex)
-                .map_err(|err| HttpError::from(err.description().to_string()))?;
+            let txid = query.broadcast_raw(&txhex).map_err(HttpError::from_relay)?;
             http_message(StatusCode::OK, txid.to_hex(), 0)
         }
         (&Method::POST, Some(&"txs"), Some(&"test"), None, None, None) => {
             let txhexes: Vec<String> =
-                serde_json::from_str(String::from_utf8(body.to_vec())?.as_str())?;
+                serde_json::from_str(String::from_utf8(body.to_vec())?.as_str())
+                    .map_err(|err| HttpError::from(err.to_string()))?;
 
             if txhexes.len() > 25 {
                 Result::Err(HttpError::from(
@@ -1563,13 +1564,14 @@ fn handle_request(
 
             let result = query
                 .test_mempool_accept(txhexes, maxfeerate)
-                .map_err(|err| HttpError::from(err.description().to_string()))?;
+                .map_err(HttpError::from_relay)?;
 
             json_response(result, TTL_SHORT)
         }
         (&Method::POST, Some(&"txs"), Some(&"package"), None, None, None) => {
             let txhexes: Vec<String> =
-                serde_json::from_str(String::from_utf8(body.to_vec())?.as_str())?;
+                serde_json::from_str(String::from_utf8(body.to_vec())?.as_str())
+                    .map_err(|err| HttpError::from(err.to_string()))?;
 
             if txhexes.len() > 25 {
                 Result::Err(HttpError::from(
@@ -1613,7 +1615,7 @@ fn handle_request(
 
             let result = query
                 .submit_package(txhexes, maxfeerate, maxburnamount)
-                .map_err(|err| HttpError::from(err.description().to_string()))?;
+                .map_err(HttpError::from_relay)?;
 
             json_response(result, TTL_SHORT)
         }
@@ -1815,16 +1817,20 @@ fn handle_request(
                 .map(|n: usize| n.min(ASSETS_MAX_PER_PAGE))
                 .unwrap_or(ASSETS_PER_PAGE);
 
-            let sorting = AssetSorting::from_query_params(&query_params)?;
+            // an invalid sort_field or sort_dir is the request's fault
+            let sorting = AssetSorting::from_query_params(&query_params)
+                .map_err(|err| HttpError::from(err.to_string()))?;
 
             let (total_num, assets) = query.list_registry_assets(start_index, limit, sorting)?;
+            let assets = serde_json::to_string(&assets)
+                .map_err(|err| HttpError::internal(err.to_string()))?;
 
             Ok(Response::builder()
                 // Disable caching because we don't currently support caching with query string params
                 .header("Cache-Control", "no-store")
                 .header("Content-Type", "application/json")
                 .header("X-Total-Results", total_num.to_string())
-                .body(Body::from(serde_json::to_string(&assets)?))
+                .body(Body::from(assets))
                 .unwrap())
         }
 
@@ -1971,7 +1977,8 @@ where
 }
 
 fn json_response<T: Serialize>(value: T, ttl: u32) -> Result<Response<Body>, HttpError> {
-    let value = serde_json::to_string(&value)?;
+    let value =
+        serde_json::to_string(&value).map_err(|err| HttpError::internal(err.to_string()))?;
     Ok(Response::builder()
         .header("Content-Type", "application/json")
         .header("Cache-Control", format!("public, max-age={:}", ttl))
@@ -2112,6 +2119,49 @@ impl HttpError {
     fn not_found(msg: String) -> Self {
         HttpError(StatusCode::NOT_FOUND, msg)
     }
+
+    // electrs's own failure, or its node's, rather than the request's
+    fn internal(msg: String) -> Self {
+        HttpError(StatusCode::INTERNAL_SERVER_ERROR, msg)
+    }
+
+    /// An error from relaying the client's transactions to the node: POST /tx, /txs/test and
+    /// /txs/package. The node's verdict on them, a JSON-RPC error whose code judges the
+    /// request, is the request's fault and keeps its 400 and text. Any other error maps as
+    /// it does elsewhere.
+    fn from_relay(e: errors::Error) -> Self {
+        match e.kind() {
+            errors::ErrorKind::RpcError(_, code, _) if !is_node_failure(*code) => {
+                HttpError(StatusCode::BAD_REQUEST, e.to_string())
+            }
+            _ => HttpError::from(e),
+        }
+    }
+}
+
+/// Whether a JSON-RPC error code says the node failed, or could not serve the call, rather
+/// than judging what the client sent. The codes are Bitcoin Core's (src/rpc/protocol.h),
+/// which qbitd keeps.
+fn is_node_failure(code: i64) -> bool {
+    match code {
+        // JSON-RPC's own errors (parse error, invalid request, method not found, invalid
+        // params, internal error): electrs made the call, so the fault is its or the node's
+        -32768..=-32000 => true,
+        // RPC_MISC_ERROR: an exception escaped the node's handler
+        -1 => true,
+        // RPC_OUT_OF_MEMORY, RPC_DATABASE_ERROR
+        -7 | -20 => true,
+        // RPC_CLIENT_P2P_DISABLED, RPC_METHOD_DEPRECATED, RPC_CLIENT_MEMPOOL_DISABLED
+        -33..=-31 => true,
+        _ => is_node_unavailable(code),
+    }
+}
+
+/// Whether a JSON-RPC error code says the node can't serve calls yet: RPC_IN_WARMUP (the
+/// daemon client reconnects and retries on it), RPC_CLIENT_NOT_CONNECTED and
+/// RPC_CLIENT_IN_INITIAL_DOWNLOAD
+fn is_node_unavailable(code: i64) -> bool {
+    matches!(code, -28 | -9 | -10)
 }
 
 impl From<String> for HttpError {
@@ -2158,17 +2208,27 @@ impl From<qbit_address::Error> for HttpError {
 impl From<errors::Error> for HttpError {
     fn from(e: errors::Error) -> Self {
         warn!("errors::Error: {:?}", e);
-        match e.description().to_string().as_ref() {
-            "getblock RPC error: {\"code\":-5,\"message\":\"Block not found\"}" => {
-                HttpError::not_found("Block not found".to_string())
+        let status = match e.kind() {
+            errors::ErrorKind::RpcError(method, -5, _) if method == "getblock" => {
+                return HttpError::not_found("Block not found".to_string());
             }
-            _ => HttpError::from(e.to_string()),
-        }
-    }
-}
-impl From<serde_json::Error> for HttpError {
-    fn from(e: serde_json::Error) -> Self {
-        HttpError::from(e.to_string())
+            // limits electrs is configured to refuse past. Clients match on the text.
+            errors::ErrorKind::TooManyUtxos(_) | errors::ErrorKind::TooManyTxs(_) => {
+                StatusCode::BAD_REQUEST
+            }
+            // the node is unreachable or still starting up, or electrs is shutting down
+            errors::ErrorKind::Connection(_) | errors::ErrorKind::Interrupt(_) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            errors::ErrorKind::RpcError(_, code, _) if is_node_unavailable(*code) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            // anything else failed in electrs, such as an index entry it can't find, or in
+            // its node. A request electrs relays to the node maps the node's verdict with
+            // from_relay instead.
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        HttpError(status, e.to_string())
     }
 }
 impl From<encode::Error> for HttpError {
@@ -2192,6 +2252,7 @@ impl From<address::AddressError> for HttpError {
 mod tests {
     #[cfg(not(feature = "liquid"))]
     use crate::chain::{Network, Script, Transaction};
+    use crate::errors::{Error, ErrorKind};
     #[cfg(not(feature = "liquid"))]
     use crate::new_index::compute_script_hash;
     #[cfg(not(feature = "liquid"))]
@@ -2199,6 +2260,7 @@ mod tests {
     use crate::rest::HttpError;
     #[cfg(not(feature = "liquid"))]
     use bitcoin::consensus::encode::deserialize;
+    use hyper::StatusCode;
     use serde_json::Value;
     use std::collections::HashMap;
 
@@ -2297,6 +2359,106 @@ mod tests {
         assert!(err.is_err());
     }
 
+    fn rpc_error(method: &str, code: i64) -> Error {
+        Error::from(ErrorKind::RpcError(
+            method.to_string(),
+            code,
+            json!({"code": code, "message": "reason"}),
+        ))
+    }
+
+    #[test]
+    fn limits_keep_their_400_and_text() {
+        // the explorer answers 413 to these, matching on the status and text
+        let err = HttpError::from(Error::from(ErrorKind::TooManyUtxos(50_000)));
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.1,
+            "Too many unspent transaction outputs (>50000). Contact support to raise limits."
+        );
+
+        let err = HttpError::from(Error::from(ErrorKind::TooManyTxs(10_000)));
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.1,
+            "Too many history transactions (>10000). Contact support to raise limits."
+        );
+    }
+
+    #[test]
+    fn electrs_and_node_failures_answer_500() {
+        // a history or merkle-proof lookup that finds an index entry but not its data
+        let err = HttpError::from(Error::from("missing tx"));
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.1, "missing tx");
+
+        // a node error where the request relays nothing to the node
+        let err = HttpError::from(rpc_error("getblockheader", -32603));
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            err.1,
+            r#"getblockheader RPC error: {"code":-32603,"message":"reason"}"#
+        );
+
+        // a response that can't be serialized: serde_json only takes string map keys
+        let unserializable: HashMap<Vec<u8>, u8> = vec![(vec![1], 1)].into_iter().collect();
+        let err = super::json_response(unserializable, 0).unwrap_err();
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn an_unavailable_node_or_a_shutdown_answers_503() {
+        for err in [
+            Error::from(ErrorKind::Interrupt(15)),
+            Error::from(ErrorKind::Connection("no reply from daemon".to_string())),
+            rpc_error("getblockchaininfo", -10),
+        ] {
+            assert_eq!(HttpError::from(err).0, StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
+
+    #[test]
+    fn getblock_not_found_answers_404() {
+        let err = HttpError::from(Error::from(ErrorKind::RpcError(
+            "getblock".to_string(),
+            -5,
+            json!({"code": -5, "message": "Block not found"}),
+        )));
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert_eq!(err.1, "Block not found");
+    }
+
+    #[test]
+    fn relayed_verdicts_keep_400_and_text_and_node_failures_answer_5xx() {
+        // the node's verdict on the client's transactions or parameters
+        for code in [-3, -8, -22, -25, -26, -27] {
+            let err = HttpError::from_relay(rpc_error("sendrawtransaction", code));
+            assert_eq!(err.0, StatusCode::BAD_REQUEST, "code {}", code);
+            assert_eq!(
+                err.1,
+                format!(
+                    r#"sendrawtransaction RPC error: {{"code":{},"message":"reason"}}"#,
+                    code
+                )
+            );
+        }
+        // the node failed, or electrs's call to it did
+        for code in [-32700, -32601, -32603, -1, -7, -20, -31, -32, -33] {
+            let err = HttpError::from_relay(rpc_error("submitpackage", code));
+            assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR, "code {}", code);
+        }
+        // the node can't serve calls yet
+        for code in [-28, -9, -10] {
+            let err = HttpError::from_relay(rpc_error("testmempoolaccept", code));
+            assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE, "code {}", code);
+        }
+        // electrs couldn't read the node's answer, or is shutting down
+        let err = HttpError::from_relay(Error::from("invalid testmempoolaccept reply"));
+        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        let err = HttpError::from_relay(Error::from(ErrorKind::Interrupt(15)));
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     #[cfg(not(feature = "liquid"))]
     #[test]
     fn qbit_p2mr_address_to_scripthash_uses_raw_script_bytes() {
@@ -2334,6 +2496,8 @@ mod tests {
             .expect("address should be a string");
 
         let err = super::address_to_scripthash(address, Network::QbitRegtest).unwrap_err();
+        // the explorer reads a 400 that starts "invalid qbit " as the request's fault
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("expected qbrt, got tq"));
     }
 
