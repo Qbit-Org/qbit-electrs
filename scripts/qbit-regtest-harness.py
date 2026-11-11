@@ -204,6 +204,17 @@ def http_json(port: int, path: str, timeout: float = 5.0):
     return json.loads(http_text(port, path, timeout))
 
 
+def http_post_json(port: int, path: str, body: object, timeout: float = 5.0):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode())
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run qbitd regtest -> qbit-electrs smoke/parity harness.",
@@ -1083,6 +1094,37 @@ class Harness:
 
         self.check_rest_address_scripthash_parity(expected_confirmed=False)
         self.check_rest_prevout_spend(expected_confirmed=False)
+        self.check_rest_history_paging_past_mempool()
+
+    def check_rest_history_paging_past_mempool(self) -> None:
+        # The probe P2MR address has one mempool transaction, the spend, and its confirmed
+        # funding. A page of max_txs=1 holds the spend, and the page after it must start
+        # the confirmed history rather than come back empty.
+        base = f"/address/{self.p2mr_address}"
+        chain_txids = [tx.get("txid") for tx in http_json(self.http_port, f"{base}/txs/chain")]
+        if not chain_txids:
+            raise HarnessError(f"REST chain history missing for {self.p2mr_address}")
+
+        first_page = http_json(self.http_port, f"{base}/txs?max_txs=1")
+        if [tx.get("txid") for tx in first_page] != [self.spend_txid]:
+            raise HarnessError(f"REST first history page should hold the mempool spend: {first_page}")
+
+        after_spend = f"txs?max_txs=1&after_txid={self.spend_txid}"
+        pages = {
+            "address": http_json(self.http_port, f"{base}/{after_spend}"),
+            "addresses": http_post_json(
+                self.http_port,
+                f"/addresses/{after_spend}",
+                [self.p2mr_address],
+            ),
+        }
+        for route, page in pages.items():
+            txids = [tx.get("txid") for tx in page]
+            if txids != chain_txids[:1]:
+                raise HarnessError(
+                    f"REST {route} history page after the last mempool transaction should "
+                    f"start the confirmed history {chain_txids[:1]}: {txids}"
+                )
 
     def check_mempool_aggregate_surfaces(self, phase: str) -> None:
         expected_size = self.expected_spend_vsize()
