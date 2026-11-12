@@ -15,13 +15,6 @@ error_chain! {
             display("Iterrupted by signal {}", sig)
         }
 
-        // The daemon answered a JSON-RPC call with an error object. The text is the
-        // same as when this was a plain message; REST and Electrum clients see it.
-        RpcError(method: String, code: i64, error: serde_json::Value) {
-            description("RPC error")
-            display("{} RPC error: {}", method, error)
-        }
-
         TooManyUtxos(limit: usize) {
             description("Too many unspent transaction outputs. Contact support to raise limits.")
             display("Too many unspent transaction outputs (>{}). Contact support to raise limits.", limit)
