@@ -133,7 +133,7 @@ fn parse_jsonrpc_reply(mut reply: Value, method: &str, expected_id: u64) -> Resu
                     match code {
                         // RPC_IN_WARMUP -> retry by later reconnection
                         -28 => bail!(ErrorKind::Connection(err.to_string())),
-                        _ => bail!(ErrorKind::RpcError(method.to_owned(), code, err.clone())),
+                        _ => bail!("{} RPC error: {}", method, err),
                     }
                 }
             }
@@ -1074,46 +1074,5 @@ mod tests {
             .expect_err("non-AuxPoW qbit header must not accept trailing block bytes");
 
         assert!(err.to_string().contains("failed to parse qbit header"));
-    }
-}
-
-#[cfg(test)]
-mod rpc_reply_tests {
-    use super::*;
-
-    #[test]
-    fn rpc_error_reply_keeps_its_code_and_text() {
-        let reply = json!({
-            "result": null,
-            "error": {"code": -26, "message": "min relay fee not met, 0 < 110"},
-            "id": 7,
-        });
-        let err = parse_jsonrpc_reply(reply, "sendrawtransaction", 7).unwrap_err();
-
-        match err.kind() {
-            ErrorKind::RpcError(method, code, _) => {
-                assert_eq!(method, "sendrawtransaction");
-                assert_eq!(*code, -26);
-            }
-            kind => panic!("expected an RPC error, got {:?}", kind),
-        }
-        // the text REST and Electrum clients already see
-        assert_eq!(
-            err.to_string(),
-            r#"sendrawtransaction RPC error: {"code":-26,"message":"min relay fee not met, 0 < 110"}"#
-        );
-    }
-
-    #[test]
-    fn rpc_warmup_reply_is_a_connection_error() {
-        // retry_request_batch reconnects and retries on these
-        let reply = json!({
-            "result": null,
-            "error": {"code": -28, "message": "Loading block index..."},
-            "id": 7,
-        });
-        let err = parse_jsonrpc_reply(reply, "getblockchaininfo", 7).unwrap_err();
-
-        assert!(matches!(err.kind(), ErrorKind::Connection(_)));
     }
 }

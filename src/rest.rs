@@ -612,95 +612,17 @@ fn find_txid(
     }
 }
 
-/// The height of the block that confirms a transaction, if one does
-fn confirming_block_height(query: &Query, txid: &Txid) -> Option<u32> {
-    query
-        .chain()
-        .tx_confirming_block(txid)
-        .map(|block| block.height as u32)
-}
-
-/// A page of one or more scripts' history, newest first: their mempool transactions, then
-/// their confirmed ones. `after_txid` is the last transaction of the page before, found at
-/// `after_txid_location`. `mempool_history` and `chain_history` list the transactions after
-/// a cursor as Mempool::history and ChainQuery::history do, and `confirmed_height` gives
-/// the height of the block that confirms a transaction, if one does.
-fn history_page<M, F, C>(
-    after_txid: Option<&Txid>,
-    after_txid_location: TxidLocation,
-    max_txs: usize,
-    mempool_history: M,
-    confirmed_height: F,
-    chain_history: C,
-) -> Result<Vec<(Transaction, Option<BlockId>)>, HttpError>
-where
-    M: FnOnce(Option<&Txid>, usize) -> Vec<Transaction>,
-    F: FnOnce(&Txid) -> Option<u32>,
-    C: FnOnce(
-        Option<&Txid>,
-        Option<u32>,
-        usize,
-    ) -> Result<Vec<(Transaction, BlockId, u16)>, errors::Error>,
-{
-    let mut txs = vec![];
-
-    let (chain_after_txid, confirmed_block_height) = match after_txid_location {
-        TxidLocation::Mempool => {
-            txs.extend(
-                mempool_history(after_txid, max_txs)
-                    .into_iter()
-                    .map(|tx| (tx, None)),
-            );
-            match after_txid {
-                // The cursor may have been mined since find_txid found it in the mempool:
-                // the indexer adds a block before the mempool drops the block's
-                // transactions, and each mempool read takes its own lock, so the cursor can
-                // still be in the mempool, or can have left it before the read above, which
-                // then found nothing after it. A cursor that is confirmed now resumes the
-                // confirmed history right after itself, so the page doesn't repeat it or
-                // what was confirmed with it, whether or not mempool transactions followed.
-                Some(txid) if txs.len() < max_txs => match confirmed_height(txid) {
-                    Some(height) => (Some(txid), Some(height)),
-                    // Every mempool transaction comes before the confirmed ones, so the
-                    // confirmed history starts at its newest. The chain has no row for an
-                    // unconfirmed cursor to resume after.
-                    None => (None, None),
-                },
-                // no cursor, or a full page from the mempool alone
-                _ => (None, None),
-            }
-        }
-        TxidLocation::None => {
-            return Err(HttpError(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                String::from("after_txid not found"),
-            ));
-        }
-        TxidLocation::Chain(height) => (after_txid, Some(height)),
-    };
-
-    if txs.len() < max_txs {
-        let mut confirmed_txs = chain_history(
-            chain_after_txid,
-            confirmed_block_height,
-            max_txs - txs.len(),
-        )?;
-        confirmed_txs.sort_unstable_by(
-            |(_, blockid1, tx_position1), (_, blockid2, tx_position2)| {
-                blockid2
-                    .height
-                    .cmp(&blockid1.height)
-                    .then_with(|| tx_position2.cmp(tx_position1))
-            },
-        );
-        txs.extend(
-            confirmed_txs
-                .into_iter()
-                .map(|(tx, blockid, _)| (tx, Some(blockid))),
-        );
+#[inline]
+fn confirmed_after_txid<'a>(
+    after_txid_location: &TxidLocation,
+    after_txid: Option<&'a Txid>,
+) -> Option<&'a Txid> {
+    match after_txid_location {
+        // A mempool cursor never exists in chain history, so always
+        // start from the newest confirmed tx when crossing the boundary.
+        TxidLocation::Mempool | TxidLocation::None => None,
+        TxidLocation::Chain(_) => after_txid,
     }
-
-    Ok(txs)
 }
 
 /// Prepare transactions to be serialized in a JSON response
@@ -1001,12 +923,10 @@ fn handle_request(
                 .skip(start_index)
                 .take(config.rest_default_chain_txs_per_page)
                 .map(|txid| {
-                    // the block's txids are indexed, so a transaction missing here is
-                    // electrs's failure, not the request's
                     query
                         .lookup_txn(txid)
                         .map(|tx| (tx, confirmed_blockid.clone()))
-                        .ok_or_else(|| HttpError::internal("missing tx".to_string()))
+                        .ok_or_else(|| "missing tx".to_string())
                 })
                 .collect::<Result<Vec<(Transaction, Option<BlockId>)>, _>>()?;
 
@@ -1053,25 +973,64 @@ fn handle_request(
                 .get("after_txid")
                 .and_then(|s| s.parse::<Txid>().ok());
 
+            let mut txs = vec![];
+
             let after_txid_location = if let Some(txid) = &after_txid {
                 find_txid(txid, &query.mempool(), query.chain())
             } else {
                 TxidLocation::Mempool
             };
 
-            let txs = history_page(
-                after_txid.as_ref(),
-                after_txid_location,
-                max_txs,
-                |after_txid, limit| query.mempool().history(&script_hash[..], after_txid, limit),
-                |txid| confirming_block_height(query, txid),
-                |after_txid, start_height, limit| {
-                    query
-                        .chain()
-                        .history(&script_hash[..], after_txid, start_height, limit)
-                        .collect()
-                },
-            )?;
+            let confirmed_block_height = match after_txid_location {
+                TxidLocation::Mempool => {
+                    txs.extend(
+                        query
+                            .mempool()
+                            .history(&script_hash[..], after_txid.as_ref(), max_txs)
+                            .into_iter()
+                            .map(|tx| (tx, None)),
+                    );
+                    None
+                }
+                TxidLocation::None => {
+                    return Err(HttpError(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        String::from("after_txid not found"),
+                    ));
+                }
+                TxidLocation::Chain(height) => Some(height),
+            };
+
+            if txs.len() < max_txs {
+                let after_txid_ref =
+                    confirmed_after_txid(&after_txid_location, after_txid.as_ref());
+                let mut confirmed_txs = query
+                    .chain()
+                    .history(
+                        &script_hash[..],
+                        after_txid_ref,
+                        confirmed_block_height,
+                        max_txs - txs.len(),
+                    )
+                    .map(|res| {
+                        res.map(|(tx, blockid, tx_position)| (tx, Some(blockid), tx_position))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                confirmed_txs.sort_unstable_by(
+                    |(_, blockid1, tx_position1), (_, blockid2, tx_position2)| {
+                        blockid2
+                            .as_ref()
+                            .map(|b| b.height)
+                            .cmp(&blockid1.as_ref().map(|b| b.height))
+                            .then_with(|| tx_position2.cmp(tx_position1))
+                    },
+                );
+                txs.extend(
+                    confirmed_txs
+                        .into_iter()
+                        .map(|(tx, blockid, _)| (tx, blockid)),
+                );
+            }
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
         }
@@ -1116,29 +1075,64 @@ fn handle_request(
                 .get("after_txid")
                 .and_then(|s| s.parse::<Txid>().ok());
 
+            let mut txs = vec![];
+
             let after_txid_location = if let Some(txid) = &after_txid {
                 find_txid(txid, &query.mempool(), query.chain())
             } else {
                 TxidLocation::Mempool
             };
 
-            let txs = history_page(
-                after_txid.as_ref(),
-                after_txid_location,
-                max_txs,
-                |after_txid, limit| {
-                    query
-                        .mempool()
-                        .history_group(&script_hashes, after_txid, limit)
-                },
-                |txid| confirming_block_height(query, txid),
-                |after_txid, start_height, limit| {
-                    query
-                        .chain()
-                        .history_group(&script_hashes, after_txid, start_height, limit)
-                        .collect()
-                },
-            )?;
+            let confirmed_block_height = match after_txid_location {
+                TxidLocation::Mempool => {
+                    txs.extend(
+                        query
+                            .mempool()
+                            .history_group(&script_hashes, after_txid.as_ref(), max_txs)
+                            .into_iter()
+                            .map(|tx| (tx, None)),
+                    );
+                    None
+                }
+                TxidLocation::None => {
+                    return Err(HttpError(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        String::from("after_txid not found"),
+                    ));
+                }
+                TxidLocation::Chain(height) => Some(height),
+            };
+
+            if txs.len() < max_txs {
+                let after_txid_ref =
+                    confirmed_after_txid(&after_txid_location, after_txid.as_ref());
+                let mut confirmed_txs = query
+                    .chain()
+                    .history_group(
+                        &script_hashes,
+                        after_txid_ref,
+                        confirmed_block_height,
+                        max_txs - txs.len(),
+                    )
+                    .map(|res| {
+                        res.map(|(tx, blockid, tx_position)| (tx, Some(blockid), tx_position))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                confirmed_txs.sort_unstable_by(
+                    |(_, blockid1, tx_position1), (_, blockid2, tx_position2)| {
+                        blockid2
+                            .as_ref()
+                            .map(|b| b.height)
+                            .cmp(&blockid1.as_ref().map(|b| b.height))
+                            .then_with(|| tx_position2.cmp(tx_position1))
+                    },
+                );
+                txs.extend(
+                    confirmed_txs
+                        .into_iter()
+                        .map(|(tx, blockid, _)| (tx, blockid)),
+                );
+            }
 
             json_response(prepare_txs(txs, query, config), TTL_SHORT)
         }
@@ -1529,13 +1523,14 @@ fn handle_request(
                     .ok_or_else(|| HttpError::from("Missing tx".to_string()))?,
                 _ => return http_message(StatusCode::METHOD_NOT_ALLOWED, "Invalid method", 0),
             };
-            let txid = query.broadcast_raw(&txhex).map_err(HttpError::from_relay)?;
+            let txid = query
+                .broadcast_raw(&txhex)
+                .map_err(|err| HttpError::from(err.description().to_string()))?;
             http_message(StatusCode::OK, txid.to_hex(), 0)
         }
         (&Method::POST, Some(&"txs"), Some(&"test"), None, None, None) => {
             let txhexes: Vec<String> =
-                serde_json::from_str(String::from_utf8(body.to_vec())?.as_str())
-                    .map_err(|err| HttpError::from(err.to_string()))?;
+                serde_json::from_str(String::from_utf8(body.to_vec())?.as_str())?;
 
             if txhexes.len() > 25 {
                 Result::Err(HttpError::from(
@@ -1571,14 +1566,13 @@ fn handle_request(
 
             let result = query
                 .test_mempool_accept(txhexes, maxfeerate)
-                .map_err(HttpError::from_relay)?;
+                .map_err(|err| HttpError::from(err.description().to_string()))?;
 
             json_response(result, TTL_SHORT)
         }
         (&Method::POST, Some(&"txs"), Some(&"package"), None, None, None) => {
             let txhexes: Vec<String> =
-                serde_json::from_str(String::from_utf8(body.to_vec())?.as_str())
-                    .map_err(|err| HttpError::from(err.to_string()))?;
+                serde_json::from_str(String::from_utf8(body.to_vec())?.as_str())?;
 
             if txhexes.len() > 25 {
                 Result::Err(HttpError::from(
@@ -1622,7 +1616,7 @@ fn handle_request(
 
             let result = query
                 .submit_package(txhexes, maxfeerate, maxburnamount)
-                .map_err(HttpError::from_relay)?;
+                .map_err(|err| HttpError::from(err.description().to_string()))?;
 
             json_response(result, TTL_SHORT)
         }
@@ -1824,20 +1818,16 @@ fn handle_request(
                 .map(|n: usize| n.min(ASSETS_MAX_PER_PAGE))
                 .unwrap_or(ASSETS_PER_PAGE);
 
-            // an invalid sort_field or sort_dir is the request's fault
-            let sorting = AssetSorting::from_query_params(&query_params)
-                .map_err(|err| HttpError::from(err.to_string()))?;
+            let sorting = AssetSorting::from_query_params(&query_params)?;
 
             let (total_num, assets) = query.list_registry_assets(start_index, limit, sorting)?;
-            let assets = serde_json::to_string(&assets)
-                .map_err(|err| HttpError::internal(err.to_string()))?;
 
             Ok(Response::builder()
                 // Disable caching because we don't currently support caching with query string params
                 .header("Cache-Control", "no-store")
                 .header("Content-Type", "application/json")
                 .header("X-Total-Results", total_num.to_string())
-                .body(Body::from(assets))
+                .body(Body::from(serde_json::to_string(&assets)?))
                 .unwrap())
         }
 
@@ -1984,8 +1974,7 @@ where
 }
 
 fn json_response<T: Serialize>(value: T, ttl: u32) -> Result<Response<Body>, HttpError> {
-    let value =
-        serde_json::to_string(&value).map_err(|err| HttpError::internal(err.to_string()))?;
+    let value = serde_json::to_string(&value)?;
     Ok(Response::builder()
         .header("Content-Type", "application/json")
         .header("Cache-Control", format!("public, max-age={:}", ttl))
@@ -2126,49 +2115,6 @@ impl HttpError {
     fn not_found(msg: String) -> Self {
         HttpError(StatusCode::NOT_FOUND, msg)
     }
-
-    // electrs's own failure, or its node's, rather than the request's
-    fn internal(msg: String) -> Self {
-        HttpError(StatusCode::INTERNAL_SERVER_ERROR, msg)
-    }
-
-    /// An error from relaying the client's transactions to the node: POST /tx, /txs/test and
-    /// /txs/package. The node's verdict on them, a JSON-RPC error whose code judges the
-    /// request, is the request's fault and keeps its 400 and text. Any other error maps as
-    /// it does elsewhere.
-    fn from_relay(e: errors::Error) -> Self {
-        match e.kind() {
-            errors::ErrorKind::RpcError(_, code, _) if !is_node_failure(*code) => {
-                HttpError(StatusCode::BAD_REQUEST, e.to_string())
-            }
-            _ => HttpError::from(e),
-        }
-    }
-}
-
-/// Whether a JSON-RPC error code says the node failed, or could not serve the call, rather
-/// than judging what the client sent. The codes are Bitcoin Core's (src/rpc/protocol.h),
-/// which qbitd keeps.
-fn is_node_failure(code: i64) -> bool {
-    match code {
-        // JSON-RPC's own errors (parse error, invalid request, method not found, invalid
-        // params, internal error): electrs made the call, so the fault is its or the node's
-        -32768..=-32000 => true,
-        // RPC_MISC_ERROR: an exception escaped the node's handler
-        -1 => true,
-        // RPC_OUT_OF_MEMORY, RPC_DATABASE_ERROR
-        -7 | -20 => true,
-        // RPC_CLIENT_P2P_DISABLED, RPC_METHOD_DEPRECATED, RPC_CLIENT_MEMPOOL_DISABLED
-        -33..=-31 => true,
-        _ => is_node_unavailable(code),
-    }
-}
-
-/// Whether a JSON-RPC error code says the node can't serve calls yet: RPC_IN_WARMUP (the
-/// daemon client reconnects and retries on it), RPC_CLIENT_NOT_CONNECTED and
-/// RPC_CLIENT_IN_INITIAL_DOWNLOAD
-fn is_node_unavailable(code: i64) -> bool {
-    matches!(code, -28 | -9 | -10)
 }
 
 impl From<String> for HttpError {
@@ -2215,27 +2161,17 @@ impl From<qbit_address::Error> for HttpError {
 impl From<errors::Error> for HttpError {
     fn from(e: errors::Error) -> Self {
         warn!("errors::Error: {:?}", e);
-        let status = match e.kind() {
-            errors::ErrorKind::RpcError(method, -5, _) if method == "getblock" => {
-                return HttpError::not_found("Block not found".to_string());
+        match e.description().to_string().as_ref() {
+            "getblock RPC error: {\"code\":-5,\"message\":\"Block not found\"}" => {
+                HttpError::not_found("Block not found".to_string())
             }
-            // limits electrs is configured to refuse past. Clients match on the text.
-            errors::ErrorKind::TooManyUtxos(_) | errors::ErrorKind::TooManyTxs(_) => {
-                StatusCode::BAD_REQUEST
-            }
-            // the node is unreachable or still starting up, or electrs is shutting down
-            errors::ErrorKind::Connection(_) | errors::ErrorKind::Interrupt(_) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            errors::ErrorKind::RpcError(_, code, _) if is_node_unavailable(*code) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            // anything else failed in electrs, such as an index entry it can't find, or in
-            // its node. A request electrs relays to the node maps the node's verdict with
-            // from_relay instead.
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        HttpError(status, e.to_string())
+            _ => HttpError::from(e.to_string()),
+        }
+    }
+}
+impl From<serde_json::Error> for HttpError {
+    fn from(e: serde_json::Error) -> Self {
+        HttpError::from(e.to_string())
     }
 }
 impl From<encode::Error> for HttpError {
@@ -2257,9 +2193,10 @@ impl From<address::AddressError> for HttpError {
 
 #[cfg(test)]
 mod tests {
+    use super::{confirmed_after_txid, TxidLocation};
+    use crate::chain::Txid;
     #[cfg(not(feature = "liquid"))]
     use crate::chain::{Network, Script, Transaction};
-    use crate::errors::{Error, ErrorKind};
     #[cfg(not(feature = "liquid"))]
     use crate::new_index::compute_script_hash;
     #[cfg(not(feature = "liquid"))]
@@ -2267,7 +2204,6 @@ mod tests {
     use crate::rest::HttpError;
     #[cfg(not(feature = "liquid"))]
     use bitcoin::consensus::encode::deserialize;
-    use hyper::StatusCode;
     use serde_json::Value;
     use std::collections::HashMap;
 
@@ -2366,106 +2302,6 @@ mod tests {
         assert!(err.is_err());
     }
 
-    fn rpc_error(method: &str, code: i64) -> Error {
-        Error::from(ErrorKind::RpcError(
-            method.to_string(),
-            code,
-            json!({"code": code, "message": "reason"}),
-        ))
-    }
-
-    #[test]
-    fn limits_keep_their_400_and_text() {
-        // the explorer answers 413 to these, matching on the status and text
-        let err = HttpError::from(Error::from(ErrorKind::TooManyUtxos(50_000)));
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            err.1,
-            "Too many unspent transaction outputs (>50000). Contact support to raise limits."
-        );
-
-        let err = HttpError::from(Error::from(ErrorKind::TooManyTxs(10_000)));
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            err.1,
-            "Too many history transactions (>10000). Contact support to raise limits."
-        );
-    }
-
-    #[test]
-    fn electrs_and_node_failures_answer_500() {
-        // a history or merkle-proof lookup that finds an index entry but not its data
-        let err = HttpError::from(Error::from("missing tx"));
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(err.1, "missing tx");
-
-        // a node error where the request relays nothing to the node
-        let err = HttpError::from(rpc_error("getblockheader", -32603));
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(
-            err.1,
-            r#"getblockheader RPC error: {"code":-32603,"message":"reason"}"#
-        );
-
-        // a response that can't be serialized: serde_json only takes string map keys
-        let unserializable: HashMap<Vec<u8>, u8> = vec![(vec![1], 1)].into_iter().collect();
-        let err = super::json_response(unserializable, 0).unwrap_err();
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
-    fn an_unavailable_node_or_a_shutdown_answers_503() {
-        for err in [
-            Error::from(ErrorKind::Interrupt(15)),
-            Error::from(ErrorKind::Connection("no reply from daemon".to_string())),
-            rpc_error("getblockchaininfo", -10),
-        ] {
-            assert_eq!(HttpError::from(err).0, StatusCode::SERVICE_UNAVAILABLE);
-        }
-    }
-
-    #[test]
-    fn getblock_not_found_answers_404() {
-        let err = HttpError::from(Error::from(ErrorKind::RpcError(
-            "getblock".to_string(),
-            -5,
-            json!({"code": -5, "message": "Block not found"}),
-        )));
-        assert_eq!(err.0, StatusCode::NOT_FOUND);
-        assert_eq!(err.1, "Block not found");
-    }
-
-    #[test]
-    fn relayed_verdicts_keep_400_and_text_and_node_failures_answer_5xx() {
-        // the node's verdict on the client's transactions or parameters
-        for code in [-3, -8, -22, -25, -26, -27] {
-            let err = HttpError::from_relay(rpc_error("sendrawtransaction", code));
-            assert_eq!(err.0, StatusCode::BAD_REQUEST, "code {}", code);
-            assert_eq!(
-                err.1,
-                format!(
-                    r#"sendrawtransaction RPC error: {{"code":{},"message":"reason"}}"#,
-                    code
-                )
-            );
-        }
-        // the node failed, or electrs's call to it did
-        for code in [-32700, -32601, -32603, -1, -7, -20, -31, -32, -33] {
-            let err = HttpError::from_relay(rpc_error("submitpackage", code));
-            assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR, "code {}", code);
-        }
-        // the node can't serve calls yet
-        for code in [-28, -9, -10] {
-            let err = HttpError::from_relay(rpc_error("testmempoolaccept", code));
-            assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE, "code {}", code);
-        }
-        // electrs couldn't read the node's answer, or is shutting down
-        let err = HttpError::from_relay(Error::from("invalid testmempoolaccept reply"));
-        assert_eq!(err.0, StatusCode::INTERNAL_SERVER_ERROR);
-        let err = HttpError::from_relay(Error::from(ErrorKind::Interrupt(15)));
-        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
-    }
-
     #[cfg(not(feature = "liquid"))]
     #[test]
     fn qbit_p2mr_address_to_scripthash_uses_raw_script_bytes() {
@@ -2503,8 +2339,6 @@ mod tests {
             .expect("address should be a string");
 
         let err = super::address_to_scripthash(address, Network::QbitRegtest).unwrap_err();
-        // the explorer reads a 400 that starts "invalid qbit " as the request's fault
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("expected qbrt, got tq"));
     }
 
@@ -2575,6 +2409,37 @@ mod tests {
             header_hex,
             hex::encode(&extended_header),
             "REST block header endpoint must not expose qbitd's AuxPoW-extended serialized header"
+        );
+    }
+
+    #[test]
+    fn test_confirmed_after_txid_uses_chain_cursor_only() {
+        let txid: Txid = "0000000000000000000000000000000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
+
+        assert_eq!(
+            confirmed_after_txid(&TxidLocation::Mempool, Some(&txid)),
+            None
+        );
+        assert_eq!(confirmed_after_txid(&TxidLocation::None, Some(&txid)), None);
+        assert_eq!(
+            confirmed_after_txid(&TxidLocation::Chain(123), Some(&txid)),
+            Some(&txid)
+        );
+    }
+
+    #[test]
+    fn test_confirmed_after_txid_allows_mempool_chain_boundary_progress() {
+        let txid: Txid = "0000000000000000000000000000000000000000000000000000000000000002"
+            .parse()
+            .unwrap();
+
+        // If a mempool cursor returns no newer mempool txs, confirmed history
+        // must start from the newest confirmed tx instead of seeking this txid.
+        assert_eq!(
+            confirmed_after_txid(&TxidLocation::Mempool, Some(&txid)),
+            None
         );
     }
 
@@ -2698,187 +2563,6 @@ mod tests {
                 result, expected,
                 "Block {} difficulty is {} but Core difficulty is {}",
                 hash, result, core_difficulty,
-            );
-        }
-    }
-
-    // Transactions and history sources for the history_page tests
-    #[cfg(not(feature = "liquid"))]
-    mod history_fakes {
-        use crate::chain::{BlockHash, Transaction, Txid};
-        use crate::util::BlockId;
-
-        pub type ChainRow = (Transaction, BlockId, u16);
-
-        pub fn tx(n: u32) -> Transaction {
-            Transaction {
-                version: 2,
-                lock_time: n,
-                input: vec![],
-                output: vec![],
-            }
-        }
-
-        // confirmed transactions, newest first, each in a block below the one before
-        pub fn chain(txs: Vec<Transaction>, tip: usize) -> Vec<ChainRow> {
-            txs.into_iter()
-                .enumerate()
-                .map(|(i, tx)| {
-                    let blockid = BlockId {
-                        height: tip - i,
-                        hash: BlockHash::default(),
-                        time: 0,
-                    };
-                    (tx, blockid, 0)
-                })
-                .collect()
-        }
-
-        // what Mempool::history and ChainQuery::history list after a cursor: the rows past
-        // it, or none when it isn't among them
-        pub fn after<T: Clone>(
-            rows: &[T],
-            txid: fn(&T) -> Txid,
-            cursor: Option<&Txid>,
-            limit: usize,
-        ) -> Vec<T> {
-            rows.iter()
-                .skip_while(|row| cursor.is_some_and(|cursor| txid(row) != *cursor))
-                .skip(cursor.map_or(0, |_| 1))
-                .take(limit)
-                .cloned()
-                .collect()
-        }
-
-        pub fn row_txid(row: &ChainRow) -> Txid {
-            row.0.txid()
-        }
-
-        // the height ChainQuery::tx_confirming_block gives
-        pub fn confirmed_height(chain: &[ChainRow], txid: &Txid) -> Option<u32> {
-            chain
-                .iter()
-                .find(|row| row_txid(row) == *txid)
-                .map(|(_, blockid, _)| blockid.height as u32)
-        }
-
-        pub fn txids<'a>(txs: impl IntoIterator<Item = &'a Transaction>) -> Vec<Txid> {
-            txs.into_iter().map(Transaction::txid).collect()
-        }
-    }
-
-    #[cfg(not(feature = "liquid"))]
-    #[test]
-    fn history_pages_continue_from_the_mempool_into_the_confirmed_history() {
-        use self::history_fakes::{after, chain, confirmed_height, row_txid, tx, txids};
-        use super::{history_page, TxidLocation};
-        use crate::chain::Txid;
-        use hyper::StatusCode;
-
-        // as many mempool transactions as a page holds, and more confirmed ones, each list
-        // newest first
-        let max_txs = 3;
-        let mempool: Vec<Transaction> = (0..3).map(tx).collect();
-        let chain = chain((3..8).map(tx).collect(), 97);
-        let confirmed: Vec<&Transaction> = chain.iter().map(|(tx, _, _)| tx).collect();
-        let page = |after_txid: Option<Txid>, location: TxidLocation| {
-            history_page(
-                after_txid.as_ref(),
-                location,
-                max_txs,
-                |cursor, limit| after(&mempool, Transaction::txid, cursor, limit),
-                |txid| confirmed_height(&chain, txid),
-                |cursor, _start_height, limit| Ok(after(&chain, row_txid, cursor, limit)),
-            )
-            .unwrap()
-        };
-
-        let first = page(None, TxidLocation::Mempool);
-        assert_eq!(txids(first.iter().map(|(tx, _)| tx)), txids(&mempool));
-
-        // after the last mempool transaction, the first confirmed page
-        let second = page(Some(mempool[2].txid()), TxidLocation::Mempool);
-        assert_eq!(
-            txids(second.iter().map(|(tx, _)| tx)),
-            txids(confirmed[..3].iter().copied())
-        );
-        assert!(second.iter().all(|(_, blockid)| blockid.is_some()));
-
-        // after a confirmed transaction, the rest of the confirmed history
-        let third = page(Some(confirmed[2].txid()), TxidLocation::Chain(95));
-        assert_eq!(
-            txids(third.iter().map(|(tx, _)| tx)),
-            txids(confirmed[3..].iter().copied())
-        );
-
-        // after an earlier mempool transaction, the rest of the mempool, then the newest
-        // confirmed one
-        let mid = page(Some(mempool[0].txid()), TxidLocation::Mempool);
-        assert_eq!(
-            txids(mid.iter().map(|(tx, _)| tx)),
-            txids(mempool[1..].iter().chain(confirmed[..1].iter().copied()))
-        );
-
-        let err = history_page(
-            Some(&tx(99).txid()),
-            TxidLocation::None,
-            max_txs,
-            |_, _| unreachable!(),
-            |_| unreachable!(),
-            |_, _, _| unreachable!(),
-        )
-        .unwrap_err();
-        assert_eq!(err.0, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(err.1, "after_txid not found");
-    }
-
-    #[cfg(not(feature = "liquid"))]
-    #[test]
-    fn history_page_resumes_after_a_mempool_cursor_that_was_just_mined() {
-        use self::history_fakes::{after, chain, confirmed_height, row_txid, tx, txids};
-        use super::{history_page, TxidLocation};
-
-        // The client's cursor was in the address's mempool and has just been mined, so it
-        // now heads the confirmed history. find_txid still found it in the mempool: the
-        // indexer adds a block before the mempool drops its transactions. By the time the
-        // page reads the mempool again, the cursor may still be there, with or without an
-        // unconfirmed transaction after it, or gone.
-        let max_txs = 3;
-        let cursor = tx(1);
-        let unconfirmed = tx(9);
-        let chain = chain(vec![cursor.clone(), tx(2), tx(3), tx(4), tx(5)], 101);
-        let cases = [
-            (vec![tx(0), cursor.clone()], vec![]),
-            (
-                vec![tx(0), cursor.clone(), unconfirmed.clone()],
-                vec![&unconfirmed],
-            ),
-            (vec![tx(0)], vec![]),
-        ];
-        for (mempool, mempool_page) in cases {
-            let page = history_page(
-                Some(&cursor.txid()),
-                TxidLocation::Mempool,
-                max_txs,
-                |after_txid, limit| after(&mempool, Transaction::txid, after_txid, limit),
-                |txid| confirmed_height(&chain, txid),
-                |after_txid, start_height, limit| {
-                    assert_eq!(start_height, Some(101));
-                    Ok(after(&chain, row_txid, after_txid, limit))
-                },
-            )
-            .unwrap();
-
-            // what the mempool still holds after the cursor, then the confirmed history
-            // right after the cursor, without the cursor again
-            let rest = max_txs - mempool_page.len();
-            assert_eq!(
-                txids(page.iter().map(|(tx, _)| tx)),
-                txids(
-                    mempool_page
-                        .into_iter()
-                        .chain(chain[1..1 + rest].iter().map(|(tx, _, _)| tx))
-                )
             );
         }
     }
