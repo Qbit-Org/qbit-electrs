@@ -33,7 +33,11 @@ and every commit in it then needs a verified signature. How that is done is
 still to be settled; whatever the answer, its head branch has to be listed in
 `AS_IS_HEADS` in `main`'s copy of the workflow, and merge commits allowed
 again in `public-main-minimal.json` and `repository-settings.json`, before it
-can merge.
+can merge. The check then judges the branch's head commit, which has to be the
+merge commit, made and signed by a maintainer (`git merge -S`, or
+`git commit -S` to finish one that stopped on conflicts): that signature
+answers for everything the branch brings. A head commit GitHub made fails the
+check.
 
 The maintainer's push dismisses earlier approvals, and whoever pushed can't
 give the new one. Someone else approves again, or an organization admin merges
@@ -89,8 +93,8 @@ Requests). GitHub signs the commit its squash merge makes, so GitHub's own
 signature satisfies the signature rule on `main`, and what requires a person's
 signature is the `signed-landing` check, which a ruleset nobody can bypass
 requires. Merge commits are off because no pull request here lands as it is
-yet: `AS_IS_HEADS` in the workflow is empty. GitHub's rebase merge makes
-commits with no signature, which the rule refuses.
+yet: `AS_IS_HEADS` and `AS_IS_LINES` in the workflow are empty. GitHub's
+rebase merge makes commits with no signature, which the rule refuses.
 
 ## Apply a change
 
