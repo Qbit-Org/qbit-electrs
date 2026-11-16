@@ -142,6 +142,11 @@ chain again: applying a file twice is harmless. Run it only once
 allows it. A pull request that is already open shows the check as expected
 until its next push or edit: edit its title or description to start a run.
 
+A change to the merge methods on a repository that is already set up needs the
+same order, so run this chain for it too. Applying `public-main-minimal.json`
+alone would leave no method that both the ruleset and the setting allow, and
+nothing could merge until the setting followed.
+
 ```bash
 apply .github/rulesets/signed-commits.json &&
   gh api -X PATCH "$repo" -F allow_squash_merge=true --silent &&
