@@ -11,6 +11,7 @@ merge-method setting in the same way.
 | `signed-commits.json` | A verified signature on every commit added to `main`. No bypass actors. |
 | `required-checks.json` | `main`: the `signed-landing` check must pass. No bypass actors. |
 | `public-main-minimal.json` | `main`: pull requests with one approval and resolved review threads, squash merges only; no deletion or force push. Organization admins can bypass it when merging a pull request. |
+| `release-tags.json` | `v*` tags can't be moved or deleted. No bypass actors. |
 
 Every commit that a push or merge adds to `main` needs a verified signature.
 Commits already on the branch aren't checked again, but an old unsigned commit
@@ -156,6 +157,7 @@ apply .github/rulesets/signed-commits.json &&
   gh api -X PATCH "$repo" -F allow_squash_merge=true --silent &&
   apply .github/rulesets/required-checks.json &&
   apply .github/rulesets/public-main-minimal.json &&
+  apply .github/rulesets/release-tags.json &&
   gh api -X PATCH "$repo" --input .github/repository-settings.json --silent
 ```
 
