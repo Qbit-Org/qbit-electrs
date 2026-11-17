@@ -10,24 +10,34 @@ merge-method setting in the same way.
 | --- | --- |
 | `signed-commits.json` | A verified signature on every commit added to `main`. No bypass actors. |
 | `required-checks.json` | `main`: the `signed-landing` check must pass. No bypass actors. |
-| `public-main-minimal.json` | `main`: pull requests with one approval and resolved review threads, merge commits only; no deletion or force push. Organization admins can bypass it when merging a pull request. |
+| `public-main-minimal.json` | `main`: pull requests with one approval and resolved review threads, squash merges only; no deletion or force push. Organization admins can bypass it when merging a pull request. |
 
 Every commit that a push or merge adds to `main` needs a verified signature.
 Commits already on the branch aren't checked again, but an old unsigned commit
 that a push or merge brings into an existing branch from another one is
 refused like a new one. Commits on a pull request's branch don't need one
 while it is open. Before it merges, a maintainer rewrites the branch as one
-commit, signs that commit with their own key and pushes it, and then merges it
-with a merge commit, which GitHub signs. So the target branch gains one commit
-a person signed, and one merge commit. For a pull request from a fork, that
-push needs "Allow edits by maintainers". Without it, a maintainer opens the
-same change from a branch in this repository.
+commit, signs that commit with their own key and pushes it. For a pull request
+from a fork, that push needs "Allow edits by maintainers". Without it, a
+maintainer opens the same change from a branch in this repository. Once
+`signed-landing` passes, the pull request is squash-merged: GitHub makes one
+commit on `main`, carrying the signed commit's message, and signs it itself.
+So `main` gains that one commit, and no merge commit. The commit the
+maintainer signed stays as the pull request's head, which GitHub keeps as
+`refs/pull/<number>/head`; when `squash-sign merge` makes the merge, the
+landed commit's `Signed-commit:` line names it.
 
 Bringing in upstream mempool/electrs history is not covered by this. Rewriting
 it as one commit would drop upstream's lineage, so it has to land as it is,
 and every commit in it then needs a verified signature. How that is done is
 still to be settled; whatever the answer, its head branch has to be listed in
-`AS_IS_HEADS` in `main`'s copy of the workflow before it can merge.
+`AS_IS_HEADS` in `main`'s copy of the workflow, and merge commits allowed
+again in `public-main-minimal.json` and `repository-settings.json`, before it
+can merge. The check then judges the branch's head commit, which has to be the
+merge commit, made and signed by a maintainer (`git merge -S`, or
+`git commit -S` to finish one that stopped on conflicts): that signature
+answers for everything the branch brings. A head commit GitHub made fails the
+check.
 
 The maintainer's push dismisses earlier approvals, and whoever pushed can't
 give the new one. Someone else approves again, or an organization admin merges
@@ -78,10 +88,13 @@ the repository draws on that token's hourly allowance of requests. A flood of
 pull request events can use it up, and the check then fails for every pull
 request until the hour is over.
 
-The repository's settings allow merge commits only (Settings → General → Pull
-Requests). GitHub's squash merge would make the commit itself and sign it with
-GitHub's key, so no person's signature would reach the branch. Its rebase
-merge makes commits with no signature, which the rule refuses.
+The repository's settings allow squash merges only (Settings → General → Pull
+Requests). GitHub signs the commit its squash merge makes, so GitHub's own
+signature satisfies the signature rule on `main`, and what requires a person's
+signature is the `signed-landing` check, which a ruleset nobody can bypass
+requires. Merge commits are off because no pull request here lands as it is
+yet: `AS_IS_HEADS` and `AS_IS_LINES` in the workflow are empty. GitHub's
+rebase merge makes commits with no signature, which the rule refuses.
 
 ## Apply a change
 
@@ -124,18 +137,23 @@ gh api -X PATCH "$repo" --input .github/repository-settings.json --silent
 ```
 
 The merge-method setting isn't a ruleset. To set a repository up from these
-files, apply `signed-commits.json` first, allow merge commits, apply the other
-files, then turn squash and rebase merges off. No step leaves the repository
-unable to merge, and unsigned commits can't land after the first one. The
-chain stops at the first step that fails. Fix that step and run the chain
-again: applying a file twice is harmless. Run it only once
+files, apply `signed-commits.json` first, allow squash merges, apply the other
+files, then turn merge commits and rebase merges off. No step leaves the
+repository unable to merge, and unsigned commits can't land after the first
+one. The chain stops at the first step that fails. Fix that step and run the
+chain again: applying a file twice is harmless. Run it only once
 `signed-landing.yml` is on `main`, the default branch, and the Actions policy
 allows it. A pull request that is already open shows the check as expected
 until its next push or edit: edit its title or description to start a run.
 
+A change to the merge methods on a repository that is already set up needs the
+same order, so run this chain for it too. Applying `public-main-minimal.json`
+alone would leave no method that both the ruleset and the setting allow, and
+nothing could merge until the setting followed.
+
 ```bash
 apply .github/rulesets/signed-commits.json &&
-  gh api -X PATCH "$repo" -F allow_merge_commit=true --silent &&
+  gh api -X PATCH "$repo" -F allow_squash_merge=true --silent &&
   apply .github/rulesets/required-checks.json &&
   apply .github/rulesets/public-main-minimal.json &&
   gh api -X PATCH "$repo" --input .github/repository-settings.json --silent
